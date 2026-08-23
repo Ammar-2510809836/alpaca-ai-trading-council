@@ -1,0 +1,3 @@
+timestamp,underlying,symbol,asset_class,structure,direction,qty,limit_price,client_order_id,status
+2026-08-22T20:46:08.888806+00:00,BTC/USD,BTC/USD,crypto,long_spot,bullish,0.025853,2000.0,aiagent-long-spot-ef306ee5,submitted
+2026-08-22T20:46:11.107223+00:00,ETH/USD,ETH/USD,crypto,long_spot,bullish,0.820764,2000.0,aiagent-long-spot-555f2d07,submitted

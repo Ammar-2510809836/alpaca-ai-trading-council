@@ -1,0 +1,42 @@
+# Environment variables & secrets (CRITICAL: NEVER COMMIT REAL KEYS)
+.env
+.env.local
+.env.*.local
+*.env
+!.env.example
+.streamlit/secrets.toml
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Python bytecode and cache
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Logs and runtime states
+*.log
+engine.log
+journals/engine_state.json
+
+# Local conversation logs / dumps
+trading-bot-adaptation-for-alpaca-hackathon.json
+*.jsonl
+
+# Temporary scripts
+_verify_*.py
+_repair_*.py
+
+# Operating system & Editor files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo

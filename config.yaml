@@ -1,0 +1,38 @@
+mode: paper
+order_tag: aiagent
+data_feed: iex
+
+symbols: [AAPL, MSFT, NVDA, SPY, TSLA, AMZN, META, GOOGL]
+symbols_file: symbols.txt
+timeframe: 15Min
+lookback_days: 10
+cycle_seconds: 300
+journal_dir: journals
+
+llm:
+  provider: auto
+  model:
+
+council:
+  consensus_threshold: 0.45
+
+options:
+  min_dte: 7
+  max_dte: 45
+  high_iv_threshold: 0.45
+
+risk:
+  max_open_positions: 4
+  max_risk_per_trade_pct: 0.01
+  daily_loss_cap_pct: 0.03
+
+crypto:
+  quote_allocation_pct: 0.02
+  max_total_exposure_pct: 0.10
+
+exits:
+  stop_loss_pct: 0.35
+  take_profit_pct: 0.60
+  force_close_dte: 1
+
+discord_webhook: ""

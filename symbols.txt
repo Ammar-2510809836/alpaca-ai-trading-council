@@ -1,0 +1,13 @@
+# Add one symbol per line - the agent picks it up on the next cycle.
+# Lines starting with # are ignored.
+#
+# US stocks / ETFs -> traded with OPTIONS during US market hours
+NVDA
+GLD
+SLV
+USO
+
+# everything below trades 24/7 as spot crypto (Asia, EU, US, weekends)
+[crypto]
+BTC/USD
+ETH/USD
