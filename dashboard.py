@@ -120,8 +120,19 @@ st.markdown(
         font-size: .78rem; font-weight: 700; color: {INK};
     }}
     .sys-row {{ display:flex; align-items:center; gap:8px; padding:5px 0; font-size:.86rem; }}
-    .dot-ok  {{ width:8px;height:8px;border-radius:50%;background:{TV_GREEN}; flex:none; }}
-    .dot-off {{ width:8px;height:8px;border-radius:50%;background:#d1d5db; flex:none; }}
+    .dot-ok {
+        display: inline-block; width: 8px; height: 8px; border-radius: 50%;
+        background: #089981; margin-right: 8px; vertical-align: middle;
+    }
+    .dot-warn {
+        display: inline-block; width: 8px; height: 8px; border-radius: 50%;
+        background: #f59e0b; margin-right: 8px; vertical-align: middle;
+        box-shadow: 0 0 0 3px rgba(245,158,11,.15);
+    }
+    .dot-off {
+        display: inline-block; width: 8px; height: 8px; border-radius: 50%;
+        background: #9aa2b1; margin-right: 8px; vertical-align: middle;
+    }
 </style>
 """,
     unsafe_allow_html=True,
@@ -139,6 +150,17 @@ def load_config():
 
 def load_engine_state():
     path = os.path.join(BASE, "journals", "engine_state.json")
+    if os.path.exists(path):
+        try:
+            with open(path, "r", encoding="utf-8") as handle:
+                return json.load(handle)
+        except Exception:
+            return {}
+    return {}
+
+
+def load_llm_health():
+    path = os.path.join(BASE, "journals", "llm_health.json")
     if os.path.exists(path):
         try:
             with open(path, "r", encoding="utf-8") as handle:
@@ -286,13 +308,33 @@ with st.sidebar:
         f'Alpaca Paper {"connected" if has_alpaca else "keys missing"}</div>',
         unsafe_allow_html=True,
     )
+
+    llm_health = load_llm_health()
     brain = llm_provider or "fallback votes"
-    brain_dot = "dot-ok" if llm_provider else "dot-off"
+    brain_dot = "dot-warn" if llm_health.get("has_active_rate_limit") else ("dot-ok" if llm_provider else "dot-off")
     st.markdown(
         f'<div class="sys-row"><span class="{brain_dot}"></span>Brain: <b>&nbsp;{brain}</b></div>',
         unsafe_allow_html=True,
     )
-    if state.get("llm_model"):
+
+    # Display real-time endpoint status in sidebar
+    if llm_health.get("endpoints"):
+        for ep in llm_health["endpoints"]:
+            ep_name = ep.get("provider", "").upper()
+            rem = ep.get("cooling_for_s", 0)
+            if rem > 0:
+                st.markdown(
+                    f'<div class="sys-row" style="padding-left:14px"><span class="dot-warn"></span>'
+                    f'<b style="color:#b45309">{ep_name}</b>: Rate-Limited ({rem}s)</div>',
+                    unsafe_allow_html=True,
+                )
+            else:
+                st.markdown(
+                    f'<div class="sys-row" style="padding-left:14px"><span class="dot-ok"></span>'
+                    f'{ep_name}: Online</div>',
+                    unsafe_allow_html=True,
+                )
+    elif state.get("llm_model"):
         st.markdown(f"<span class='muted mono'>{state['llm_model']}</span>", unsafe_allow_html=True)
 
     symbols = []
@@ -343,6 +385,35 @@ header_r.markdown(
     unsafe_allow_html=True,
 )
 st.caption("Multi-agent LLM council &middot; options-native execution &middot; Alpaca paper trading")
+
+# Real-time LLM rate limit and error banner
+llm_health = load_llm_health()
+if llm_health.get("has_active_rate_limit"):
+    st.warning(
+        f"⚠️ **LLM Rate-Limit Warning**: {', '.join(llm_health.get('active_rate_limits', []))} — "
+        "The system has automatically engaged cooldown protection and routed council votes to the secondary model/fallback without interruption."
+    )
+
+# Diagnostics Expander
+alerts = llm_health.get("recent_alerts", [])
+if alerts:
+    with st.expander("🤖 LLM API Health & Rate-Limit Diagnostics", expanded=False):
+        d1, d2 = st.columns([1, 2])
+        with d1:
+            st.markdown("**Configured Providers**")
+            eps = llm_health.get("endpoints", [])
+            if eps:
+                st.dataframe(pd.DataFrame(eps)[["provider", "status", "failures", "model"]], hide_index=True, width="stretch")
+            else:
+                st.caption("No endpoint stats.")
+        with d2:
+            st.markdown("**Recent Rate-Limits & Error Events**")
+            alert_df = pd.DataFrame(alerts)
+            if not alert_df.empty:
+                if "timestamp" in alert_df.columns:
+                    alert_df["time"] = alert_df["timestamp"].astype(str).str.slice(0, 19).str.replace("T", " ")
+                cols = [c for c in ("time", "provider", "error_type", "message", "cooldown_s") if c in alert_df.columns]
+                st.dataframe(alert_df[cols].head(6), hide_index=True, width="stretch")
 
 unrealized = sum(p.get("unrealized_pl", 0) for p in positions)
 

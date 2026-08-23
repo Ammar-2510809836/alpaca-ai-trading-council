@@ -5,6 +5,7 @@ import re
 import threading
 import time
 from dataclasses import dataclass
+from datetime import datetime, timezone
 
 
 @dataclass
@@ -115,11 +116,63 @@ class LLMClient:
             {
                 "provider": e.name,
                 "model": e.model,
+                "status": "COOLING_DOWN" if e.cooldown_until > now else ("ONLINE" if e.failures == 0 else "RECOVERING"),
                 "cooling_for_s": round(max(e.cooldown_until - now, 0)),
                 "failures": e.failures,
             }
             for e in self.endpoints
         ]
+
+    def _write_health(self, alert: dict = None, active_provider: str = None):
+        try:
+            os.makedirs("journals", exist_ok=True)
+            path = os.path.join("journals", "llm_health.json")
+            existing = {}
+            if os.path.exists(path):
+                try:
+                    with open(path, "r", encoding="utf-8") as h:
+                        existing = json.load(h)
+                except Exception:
+                    existing = {}
+
+            recent_alerts = existing.get("recent_alerts", [])
+            if alert:
+                recent_alerts.insert(0, alert)
+                recent_alerts = recent_alerts[:20] # keep last 20 alerts
+
+            now = time.time()
+            endpoints_info = []
+            active_rate_limits = []
+
+            for e in self.endpoints:
+                rem_cool = round(max(e.cooldown_until - now, 0))
+                is_limited = rem_cool > 0
+                st_label = f"Rate-Limited ({rem_cool}s)" if is_limited else ("Online" if e.failures == 0 else "Degraded")
+                ep_data = {
+                    "provider": e.name,
+                    "model": e.model,
+                    "status": st_label,
+                    "is_cooling_down": is_limited,
+                    "cooling_for_s": rem_cool,
+                    "failures": e.failures,
+                }
+                endpoints_info.append(ep_data)
+                if is_limited:
+                    active_rate_limits.append(f"{e.name.upper()} ({rem_cool}s cooldown)")
+
+            state = {
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "active_provider": active_provider or existing.get("active_provider", ""),
+                "active_rate_limits": active_rate_limits,
+                "has_active_rate_limit": bool(active_rate_limits),
+                "endpoints": endpoints_info,
+                "recent_alerts": recent_alerts,
+            }
+
+            with open(path, "w", encoding="utf-8") as h:
+                json.dump(state, h, indent=2)
+        except Exception:
+            pass
 
     def complete_json(self, system: str, prompt: str, max_tokens: int = 1200):
         if not self.endpoints:
@@ -136,16 +189,37 @@ class LLMClient:
                     raise ValueError("unparseable JSON response")
                 with self._lock:
                     endpoint.failures = 0
+                self._write_health(active_provider=f"{endpoint.name} ({endpoint.model})")
                 return parsed
             except Exception as exc:
-                cooldown = self._register_failure(endpoint, exc)
-                errors.append(
-                    f"{endpoint.name} ({endpoint.model}): {str(exc)[:140]}"
-                    f" [cooldown {cooldown}s]"
+                cooldown, is_rate_limit = self._register_failure(endpoint, exc)
+                err_msg = str(exc)[:140]
+                errors.append(f"{endpoint.name} ({endpoint.model}): {err_msg} [cooldown {cooldown}s]")
+
+                # Record rate limit / error event for dashboard visibility
+                self._write_health(
+                    alert={
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                        "provider": endpoint.name,
+                        "model": endpoint.model,
+                        "error_type": "RATE_LIMIT_429" if is_rate_limit else "API_ERROR",
+                        "message": err_msg,
+                        "cooldown_s": cooldown,
+                    }
                 )
 
         if errors:
             logging.warning("All LLM endpoints unavailable -> deterministic fallback. " + " | ".join(errors))
+            self._write_health(
+                alert={
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "provider": "ALL",
+                    "model": "fallback",
+                    "error_type": "FALLBACK_ENGAGED",
+                    "message": "All configured LLM providers in cooldown/error -> voting fell back to deterministic MACD/RSI models",
+                    "cooldown_s": 0,
+                }
+            )
         return None
 
     def _ordered(self):
@@ -177,7 +251,7 @@ class LLMClient:
         )
         return response.choices[0].message.content or ""
 
-    def _register_failure(self, endpoint: Endpoint, exc: Exception) -> int:
+    def _register_failure(self, endpoint: Endpoint, exc: Exception) -> tuple[int, bool]:
         text = str(exc).lower()
         rate_limited = (
             type(exc).__name__.lower().startswith("ratelimit")
@@ -185,6 +259,7 @@ class LLMClient:
             or "rate limit" in text
             or "quota" in text
             or "tokens per" in text
+            or "too many requests" in text
         )
         with self._lock:
             endpoint.failures += 1
@@ -192,13 +267,13 @@ class LLMClient:
                 idx = min(endpoint.failures - 1, len(self.BACKOFF_SECONDS) - 1)
                 cooldown = self.BACKOFF_SECONDS[idx]
             else:
-                cooldown = 5
+                cooldown = 10
             endpoint.cooldown_until = time.time() + cooldown
         logging.warning(
             f"LLM endpoint {endpoint.name} failed ({'rate-limit' if rate_limited else 'error'}), "
             f"cooling down {cooldown}s"
         )
-        return cooldown
+        return cooldown, rate_limited
 
     @staticmethod
     def _extract_json(raw):
