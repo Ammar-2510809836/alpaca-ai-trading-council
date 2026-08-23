@@ -1,6 +1,6 @@
 import json
 import os
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 
 import pandas as pd
 import streamlit as st
@@ -482,6 +482,7 @@ with tab_exec:
 
     st.divider()
 
+    # 2. Open Positions Table with Trade Open Timestamps
     st.subheader("Open positions & live AI trend diagnosis")
     if positions:
         pos_df = pd.DataFrame(positions)
@@ -493,6 +494,7 @@ with tab_exec:
         trends = []
         signals = []
         evaluated = []
+        opened_times = []
 
         for _, r in pos_df.iterrows():
             sym = r.get("symbol", "")
@@ -518,55 +520,199 @@ with tab_exec:
                     plan = "⏳ Breakeven at +3.0%"
             protections.append(plan)
 
+            # Open timestamp
+            ent_time = track.get("entry_time")
+            if ent_time:
+                opened_times.append(f"{str(ent_time)[:16].replace('T', ' ')} UTC ({format_relative_time(ent_time)})")
+            else:
+                opened_times.append("Active")
+
             evaluated.append(format_relative_time(track.get("last_checked")))
 
         pos_df["return_pct"] = return_pcts
         pos_df["ai_trend"] = trends
         pos_df["technical_signals"] = signals
         pos_df["safety_plan"] = protections
+        pos_df["opened_at"] = opened_times
         pos_df["last_checked"] = evaluated
 
         cols = [
             c for c in ("symbol", "side", "qty", "avg_entry_price",
-                        "current_price", "return_pct", "unrealized_pl", "ai_trend", "technical_signals", "safety_plan", "last_checked")
+                        "current_price", "return_pct", "unrealized_pl", "ai_trend", "technical_signals", "safety_plan", "opened_at", "last_checked")
             if c in pos_df.columns
         ]
         st.dataframe(pos_df[cols], width="stretch", hide_index=True)
     else:
         st.caption("No open positions.")
 
-    st.subheader("Working orders")
-    orders = broker.get_open_orders() if broker else []
-    if orders:
-        st.code("\n".join(orders), language=None)
-    else:
-        st.caption("No working orders.")
+    st.divider()
 
-    st.subheader("Trade journal")
-    trades_df = load_trades(40)
-    if trades_df.empty:
-        st.caption("No fills recorded yet.")
+    # 3. Timeline & Calendar Filter Controls
+    st.subheader("Trade history & executed order fills")
+    f1, f2, f3 = st.columns([2, 2, 2])
+    with f1:
+        time_filter = st.selectbox(
+            "Timeline Filter",
+            ["All History", "Today", "Last 7 Days", "Last 30 Days", "Custom Date Range"],
+            index=0,
+        )
+    with f2:
+        view_filter = st.selectbox(
+            "View Filter",
+            ["Closed Trades (P&L Audit)", "All Executed Order Fills", "Working Orders"],
+            index=0,
+        )
+    with f3:
+        if time_filter == "Custom Date Range":
+            custom_dates = st.date_input("Select Date Range", value=(date.today() - timedelta(days=7), date.today()))
+        else:
+            custom_dates = None
+
+    # Calculate cutoff date for filtering
+    cutoff = None
+    today = date.today()
+    if time_filter == "Today":
+        cutoff = datetime(today.year, today.month, today.day, tzinfo=timezone.utc)
+    elif time_filter == "Last 7 Days":
+        cutoff = datetime.now(timezone.utc) - timedelta(days=7)
+    elif time_filter == "Last 30 Days":
+        cutoff = datetime.now(timezone.utc) - timedelta(days=30)
+
+    # 4. Closed Round-Trip Trades (P&L Audit Log)
+    if view_filter == "Closed Trades (P&L Audit)":
+        closed_trades = broker.get_closed_trades() if broker else []
+        if closed_trades:
+            ct_df = pd.DataFrame(closed_trades)
+
+            # Apply date filters
+            if cutoff and "exit_time" in ct_df.columns:
+                ct_df["exit_dt"] = pd.to_datetime(ct_df["exit_time"], utc=True)
+                ct_df = ct_df[ct_df["exit_dt"] >= cutoff]
+            elif custom_dates and len(custom_dates) == 2 and "exit_time" in ct_df.columns:
+                ct_df["exit_dt"] = pd.to_datetime(ct_df["exit_time"], utc=True).dt.date
+                ct_df = ct_df[(ct_df["exit_dt"] >= custom_dates[0]) & (ct_df["exit_dt"] <= custom_dates[1])]
+
+            if not ct_df.empty:
+                # Format columns
+                show_ct = ct_df.copy()
+                show_ct["realized_pnl"] = show_ct["realized_pnl"].apply(lambda v: f"+${v:,.2f}" if v > 0 else (f"-${abs(v):,.2f}" if v < 0 else "$0.00"))
+                show_ct["return_pct"] = show_ct["return_pct"].apply(lambda v: f"{v:+.2f}%")
+                show_ct["result"] = show_ct["result"].apply(lambda r: "🟢 WIN" if r == "WIN" else ("🔴 LOSS" if r == "LOSS" else "🛡️ BREAKEVEN"))
+                show_ct["entry_time"] = show_ct["entry_time"].astype(str).str.slice(0, 19).str.replace("T", " ")
+                show_ct["exit_time"] = show_ct["exit_time"].astype(str).str.slice(0, 19).str.replace("T", " ")
+
+                cols = [c for c in ("symbol", "qty", "buy_price", "sell_price", "realized_pnl", "return_pct", "result", "duration", "entry_time", "exit_time") if c in show_ct.columns]
+                st.dataframe(show_ct[cols], width="stretch", hide_index=True)
+            else:
+                st.caption("No closed trades in selected timeline.")
+        else:
+            st.caption("No closed trades recorded yet.")
+
+    elif view_filter == "All Executed Order Fills":
+        orders = broker.get_order_history(limit=150) if broker else []
+        if orders:
+            ord_df = pd.DataFrame(orders)
+            if cutoff and "filled_at" in ord_df.columns:
+                ord_df["dt"] = pd.to_datetime(ord_df["filled_at"].fillna(ord_df["created_at"]), utc=True)
+                ord_df = ord_df[ord_df["dt"] >= cutoff]
+
+            if not ord_df.empty:
+                show_ord = ord_df.copy()
+                show_ord["side"] = show_ord["side"].apply(lambda s: "🟢 BUY" if s == "BUY" else "🔴 SELL")
+                show_ord["status"] = show_ord["status"].apply(lambda st_: "🟢 FILLED" if st_ == "FILLED" else ("🔵 WORKING" if st_ in ("NEW", "ACCEPTED") else f"⚪ {st_}"))
+                show_ord["time"] = show_ord["filled_at"].fillna(show_ord["created_at"]).astype(str).str.slice(0, 19).str.replace("T", " ")
+                show_ord["total_value"] = show_ord["total_value"].apply(lambda v: f"${v:,.2f}")
+
+                cols = [c for c in ("time", "symbol", "side", "qty", "filled_avg_price", "total_value", "status", "client_order_id") if c in show_ord.columns]
+                st.dataframe(show_ord[cols], width="stretch", hide_index=True)
+            else:
+                st.caption("No orders found in selected timeline.")
+        else:
+            st.caption("No order history available.")
+
     else:
-        st.dataframe(trades_df, width="stretch", hide_index=True)
+        st.subheader("Working orders")
+        w_orders = broker.get_open_orders() if broker else []
+        if w_orders:
+            st.code("\n".join(w_orders), language=None)
+        else:
+            st.caption("No working orders.")
 
 with tab_perf:
+    st.subheader("Performance analytics & portfolio scorecard")
+
+    # 1. Interactive Timeline Filter
+    t1, t2, t3, t4, t5 = st.columns(5)
+    time_choice = st.radio(
+        "Select Performance Period",
+        ["1D (Today)", "1W (7 Days)", "1M (30 Days)", "3M (90 Days)", "1A (1 Year)"],
+        index=2,
+        horizontal=True,
+    )
+
+    days_map = {
+        "1D (Today)": 1,
+        "1W (7 Days)": 7,
+        "1M (30 Days)": 30,
+        "3M (90 Days)": 90,
+        "1A (1 Year)": 365,
+    }
+    sel_days = days_map.get(time_choice, 30)
+
     if broker:
-        history = broker.get_portfolio_history(days=30)
+        history = broker.get_portfolio_history(days=sel_days)
+        closed_trades = broker.get_closed_trades()
+
+        # Calculate rich stats from closed trades
+        total_closed = len(closed_trades)
+        wins = [t for t in closed_trades if t.get("result") == "WIN"]
+        losses = [t for t in closed_trades if t.get("result") == "LOSS"]
+        win_count = len(wins)
+        loss_count = len(losses)
+        win_rate = (win_count / total_closed * 100) if total_closed > 0 else 0.0
+
+        gross_profits = sum(float(t.get("realized_pnl", 0)) for t in wins)
+        gross_losses = abs(sum(float(t.get("realized_pnl", 0)) for t in losses))
+        profit_factor = (gross_profits / gross_losses) if gross_losses > 0 else (gross_profits if gross_profits > 0 else 1.0)
+        net_realized = sum(float(t.get("realized_pnl", 0)) for t in closed_trades)
+
+        avg_win = (gross_profits / win_count) if win_count > 0 else 0.0
+        avg_loss = (gross_losses / loss_count) if loss_count > 0 else 0.0
+
+        # Scorecard Row
+        m1, m2, m3, m4 = st.columns(4)
         if history:
             hist_df = pd.DataFrame(history)
             hist_df["time"] = pd.to_datetime(hist_df["timestamp"], unit="s")
             hist_df = hist_df.set_index("time")
-            start_eq = hist_df["equity"].iloc[0]
-            end_eq = hist_df["equity"].iloc[-1]
-            k1, k2, k3 = st.columns(3)
-            k1.metric("Equity (30d)", money(end_eq), delta=money(end_eq - start_eq))
+            start_eq = float(hist_df["equity"].iloc[0])
+            end_eq = float(hist_df["equity"].iloc[-1])
+            growth_dollar = end_eq - start_eq
+            growth_pct = ((end_eq / start_eq - 1) * 100) if start_eq > 0 else 0.0
+
+            m1.metric("Portfolio Equity", money(end_eq), delta=f"{growth_dollar:+,.2f} ({growth_pct:+.2f}%)")
+
             peak = hist_df["equity"].cummax()
             dd = ((hist_df["equity"] / peak) - 1).min() * 100
-            k2.metric("Max drawdown (30d)", f"{dd:.2f}%")
             rets = hist_df["equity"].pct_change().dropna()
-            sharpe = (rets.mean() / rets.std() * (252 ** 0.5)) if len(rets) > 2 and rets.std() > 0 else 0
-            k3.metric("Sharpe (annualized)", f"{sharpe:.2f}")
-            st.line_chart(hist_df["equity"], height=330, color=TV_GREEN)
+            sharpe = (rets.mean() / rets.std() * (252 ** 0.5)) if len(rets) > 2 and rets.std() > 0 else 0.0
+
+            m2.metric("Win Rate", f"{win_rate:.1f}%", delta=f"{win_count} Wins / {loss_count} Losses")
+            m3.metric("Net Realized P&L", f"${net_realized:+,.2f}", delta=f"Profit Factor: {profit_factor:.2f}")
+            m4.metric("Sharpe & Drawdown", f"{sharpe:.2f} Sharpe", delta=f"Max DD: {dd:.2f}%", delta_color="inverse" if dd < -5 else "normal")
+
+            st.divider()
+
+            # Equity Curve Chart
+            st.subheader(f"Equity curve ({time_choice})")
+            st.line_chart(hist_df["equity"], height=320, color=TV_GREEN)
+
+            # Trades P&L breakdown
+            if closed_trades:
+                st.subheader("Closed trades P&L distribution")
+                ct_df = pd.DataFrame(closed_trades)
+                pnl_series = ct_df.set_index("symbol")["realized_pnl"]
+                st.bar_chart(pnl_series, height=220)
         else:
             st.caption("No portfolio history yet.")
     else:

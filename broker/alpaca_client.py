@@ -149,14 +149,16 @@ class AlpacaBroker:
             )
         return positions
 
-    def get_portfolio_history(self, days: int = 30) -> list:
+    def get_portfolio_history(self, days: int = 30, period: str = None) -> list:
         try:
             from alpaca.trading.requests import GetPortfolioHistoryRequest
 
-            period_map = {7: "1W", 14: "2W", 30: "1M", 90: "3M"}
+            period_map = {1: "1D", 7: "1W", 14: "2W", 30: "1M", 90: "3M", 365: "1A"}
+            chosen_period = period or period_map.get(days, "1M")
+            tf = "15Min" if chosen_period in ("1D", "1W") else "1D"
             history_filter = GetPortfolioHistoryRequest(
-                period=period_map.get(days, "1M"),
-                timeframe="1D",
+                period=chosen_period,
+                timeframe=tf,
             )
             history = self.trading.get_portfolio_history(history_filter=history_filter)
             equity = history.equity or []
@@ -167,6 +169,110 @@ class AlpacaBroker:
             ]
         except Exception as exc:
             logging.error(f"get_portfolio_history failed: {exc}")
+            return []
+
+    def get_order_history(self, limit: int = 100) -> list:
+        try:
+            from alpaca.trading.requests import GetOrdersRequest
+            from alpaca.trading.enums import QueryOrderStatus
+
+            req = GetOrdersRequest(status=QueryOrderStatus.ALL, limit=limit)
+            raw = self.trading.get_orders(filter=req)
+            orders = []
+            for o in raw:
+                filled_price = float(o.filled_avg_price or o.limit_price or 0)
+                qty = float(o.filled_qty or o.qty or 0)
+                side_str = str(o.side.value if hasattr(o.side, "value") else o.side).upper()
+                status_str = str(o.status.value if hasattr(o.status, "value") else o.status).upper()
+                orders.append({
+                    "id": str(o.id),
+                    "client_order_id": str(o.client_order_id or ""),
+                    "symbol": o.symbol,
+                    "side": side_str,
+                    "qty": qty,
+                    "filled_avg_price": filled_price,
+                    "total_value": round(filled_price * qty, 2),
+                    "status": status_str,
+                    "created_at": o.created_at.isoformat() if o.created_at else None,
+                    "filled_at": o.filled_at.isoformat() if o.filled_at else None,
+                })
+            return orders
+        except Exception as exc:
+            logging.error(f"get_order_history failed: {exc}")
+            return []
+
+    def get_closed_trades(self, limit: int = 200) -> list:
+        try:
+            from alpaca.trading.requests import GetOrdersRequest
+            from alpaca.trading.enums import QueryOrderStatus
+
+            req = GetOrdersRequest(status=QueryOrderStatus.ALL, limit=limit)
+            raw = self.trading.get_orders(filter=req)
+            filled = [
+                o for o in raw
+                if (getattr(o, "status", None) and str(getattr(o.status, "value", o.status)).lower() == "filled")
+            ]
+            filled.sort(key=lambda x: x.filled_at or x.created_at)
+
+            closed_trades = []
+            inventory = {}
+
+            for o in filled:
+                sym = o.symbol
+                side = str(o.side.value if hasattr(o.side, "value") else o.side).lower()
+                qty = float(o.filled_qty or o.qty or 0)
+                price = float(o.filled_avg_price or 0)
+                t = o.filled_at or o.created_at
+
+                if side == "buy":
+                    inventory.setdefault(sym, []).append({"qty": qty, "price": price, "time": t})
+                elif side == "sell":
+                    rem_qty = qty
+                    total_cost = 0.0
+                    entry_times = []
+
+                    while rem_qty > 0 and inventory.get(sym):
+                        first = inventory[sym][0]
+                        take_qty = min(rem_qty, first["qty"])
+                        total_cost += take_qty * first["price"]
+                        entry_times.append(first["time"])
+                        first["qty"] -= take_qty
+                        rem_qty -= take_qty
+                        if first["qty"] <= 1e-7:
+                            inventory[sym].pop(0)
+
+                    matched_qty = qty - rem_qty
+                    if matched_qty > 0:
+                        avg_entry = total_cost / matched_qty
+                        proceeds = matched_qty * price
+                        pnl = proceeds - total_cost
+                        pnl_pct = ((price / avg_entry - 1) * 100) if avg_entry > 0 else 0.0
+                        open_time = entry_times[0] if entry_times else t
+
+                        dur_str = ""
+                        if open_time and t:
+                            delta = t - open_time
+                            hrs = int(delta.total_seconds() // 3600)
+                            mins = int((delta.total_seconds() % 3600) // 60)
+                            dur_str = f"{hrs}h {mins}m" if hrs > 0 else f"{mins}m"
+
+                        closed_trades.append({
+                            "symbol": sym,
+                            "qty": matched_qty,
+                            "entry_time": open_time.isoformat() if open_time else None,
+                            "exit_time": t.isoformat() if t else None,
+                            "duration": dur_str,
+                            "buy_price": round(avg_entry, 2),
+                            "sell_price": round(price, 2),
+                            "realized_pnl": round(pnl, 2),
+                            "return_pct": round(pnl_pct, 2),
+                            "result": "WIN" if pnl > 0 else ("LOSS" if pnl < 0 else "BREAKEVEN"),
+                        })
+
+            closed_trades.reverse()
+            return closed_trades
+        except Exception as exc:
+            logging.error(f"get_closed_trades failed: {exc}")
             return []
 
     def get_stock_bars(self, symbol: str, timeframe: str = "15Min", days: int = 10) -> pd.DataFrame:
