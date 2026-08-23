@@ -128,8 +128,11 @@ class AlpacaBroker:
 
         positions = []
         for p in raw:
-            asset_class = str(_field(p, "asset_class", ""))
+            asset_str = str(_field(p, "asset_class", "")).lower()
             underlying = _field(p, "underlying_symbol")
+            is_crypto = "crypto" in asset_str or p.symbol.upper() in ("BTCUSD", "ETHUSD", "SOLUSD", "LTCUSD", "DOGEUSD", "AVAXUSD", "LINKUSD")
+            is_option = "option" in asset_str
+            asset_kind = "option" if is_option else ("crypto" if is_crypto else "stock")
             positions.append(
                 {
                     "symbol": p.symbol,
@@ -138,11 +141,9 @@ class AlpacaBroker:
                     "avg_entry_price": float(p.avg_entry_price),
                     "current_price": float(p.current_price or 0),
                     "unrealized_pl": float(p.unrealized_pl or 0),
-                    "asset_class": "option" if "option" in asset_class
-                    else ("crypto" if "crypto" in asset_class else "stock"),
-                    "underlying": underlying or parse_occ_symbol(p.symbol)["underlying"]
-                    if "option" in asset_class and parse_occ_symbol(p.symbol)
-                    else p.symbol,
+                    "market_value": float(getattr(p, "market_value", float(p.current_price or 0) * abs(float(p.qty)))),
+                    "asset_class": asset_kind,
+                    "underlying": underlying or (parse_occ_symbol(p.symbol)["underlying"] if is_option and parse_occ_symbol(p.symbol) else p.symbol),
                     "change_today": float(getattr(p, "change_today", 0) or 0),
                 }
             )
@@ -215,13 +216,14 @@ class AlpacaBroker:
         tf = TIMEFRAMES.get(timeframe, TIMEFRAMES["15Min"])
         end = datetime.now(timezone.utc)
         start = end - timedelta(days=days)
+        req_sym = f"{symbol[:-3].upper()}/USD" if ("/" not in symbol and symbol.upper().endswith("USD")) else symbol.upper()
 
         try:
             response = self.crypto_data.get_crypto_bars(
-                CryptoBarsRequest(symbol_or_symbols=symbol, timeframe=tf, start=start, end=end)
+                CryptoBarsRequest(symbol_or_symbols=req_sym, timeframe=tf, start=start, end=end)
             )
         except Exception as exc:
-            logging.error(f"get_crypto_bars({symbol}) failed: {exc}")
+            logging.error(f"get_crypto_bars({req_sym}) failed: {exc}")
             return pd.DataFrame()
 
         bars = getattr(response, "df", None)
@@ -230,9 +232,12 @@ class AlpacaBroker:
 
         if isinstance(bars.index, pd.MultiIndex):
             try:
-                bars = bars.xs(symbol, level="symbol")
+                bars = bars.xs(req_sym, level="symbol")
             except KeyError:
-                bars = bars.droplevel(0)
+                try:
+                    bars = bars.xs(symbol, level="symbol")
+                except KeyError:
+                    bars = bars.droplevel(0)
 
         df = bars.reset_index()
         df.columns = [str(c).lower() for c in df.columns]

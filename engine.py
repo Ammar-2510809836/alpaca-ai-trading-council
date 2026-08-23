@@ -33,6 +33,7 @@ class TradingEngine:
             config=config,
         )
         self.journal = Journal(config.get("journal_dir", "journals"))
+        self.tracking_path = os.path.join(self.config.get("journal_dir", "journals"), "position_tracking.json")
 
     def _write_state(self, phase: str, message: str = "", symbol: str = ""):
         try:
@@ -50,6 +51,23 @@ class TradingEngine:
                 json.dump(state, handle)
         except OSError:
             pass
+
+    def _load_tracking(self) -> dict:
+        if os.path.exists(self.tracking_path):
+            try:
+                with open(self.tracking_path, "r", encoding="utf-8") as h:
+                    return json.load(h)
+            except Exception:
+                return {}
+        return {}
+
+    def _save_tracking(self, data: dict):
+        try:
+            os.makedirs(os.path.dirname(self.tracking_path), exist_ok=True)
+            with open(self.tracking_path, "w", encoding="utf-8") as h:
+                json.dump(data, h, indent=2)
+        except Exception as exc:
+            logging.warning(f"Failed to save position tracking: {exc}")
 
     def run_forever(self):
         interval = int(self.config.get("cycle_seconds", 300))
@@ -100,6 +118,11 @@ class TradingEngine:
 
         self._write_state("cycle_start", f"Cycle starting | {len(stocks)} stocks + {len(cryptos)} crypto")
 
+        # 1. Manage Dynamic Exits and Trailing Stops on Active Positions
+        self._write_state("exits", f"Evaluating dynamic exits & trailing stops on {len(positions)} position(s)")
+        self.manage_exits(positions)
+
+        # 2. Evaluate Potential New Entries
         if equities_open:
             for symbol in stocks:
                 try:
@@ -113,10 +136,6 @@ class TradingEngine:
             except Exception as exc:
                 logging.exception(f"Error evaluating {symbol}: {exc}")
 
-        self._write_state("exits", "Checking stop / target / DTE exits on open options")
-        self.manage_exits(positions)
-        self._write_state("exits", "Checking stop / target / DTE exits on open options")
-        self.manage_exits(positions)
         self._write_state(
             "idle",
             f"Sleeping {int(self.config.get('cycle_seconds', 300))}s until next cycle",
@@ -180,7 +199,7 @@ class TradingEngine:
         )
 
         if self.broker is None:
-            bars = None
+            bars = _synthetic_bars()
         elif asset_class == "crypto":
             bars = self.broker.get_crypto_bars(symbol, timeframe=timeframe, days=lookback)
         else:
@@ -240,7 +259,6 @@ class TradingEngine:
                 symbol,
             )
             self.execute_proposal(decision.proposal)
-            positions = self.broker.get_positions() if self.broker else []
 
     def execute_proposal(self, proposal: TradeProposal):
         if proposal.asset_class == "crypto":
@@ -343,15 +361,18 @@ class TradingEngine:
         )
 
     def manage_exits(self, positions=None):
-        exits_cfg = self.config.get("exits", {})
-        stop_pct = float(exits_cfg.get("stop_loss_pct", 0.35))
-        target_pct = float(exits_cfg.get("take_profit_pct", 0.60))
-        force_close_dte = int(exits_cfg.get("force_close_dte", 1))
+        """Dynamic exit manager with Breakeven protection, Trailing stop profit locks,
 
+        AI Council position re-evaluation, and DTE force closes.
+        """
+        exits_cfg = self.config.get("exits", {})
         if self.broker is None:
             return
         if positions is None:
             positions = self.broker.get_positions()
+
+        tracker = self._load_tracking()
+        active_syms = set()
 
         for position in positions:
             asset_kind = position.get("asset_class")
@@ -359,27 +380,108 @@ class TradingEngine:
                 continue
 
             symbol = position["symbol"]
-            dte = self._dte(symbol)
-            entry = position["avg_entry_price"]
-            current = position["current_price"]
+            active_syms.add(symbol)
+            entry = float(position.get("avg_entry_price") or 0)
+            current = float(position.get("current_price") or entry)
+            side = position.get("side", "long")
 
+            if entry <= 0 or current <= 0:
+                continue
+
+            # Update High-Water Mark / Position Tracking
+            if symbol not in tracker:
+                tracker[symbol] = {
+                    "symbol": symbol,
+                    "underlying": position.get("underlying", symbol),
+                    "asset_class": asset_kind,
+                    "entry_price": entry,
+                    "peak_price": current,
+                    "peak_gain_pct": max(0.0, (current / entry - 1)),
+                    "breakeven_active": False,
+                    "entry_time": datetime.now(timezone.utc).isoformat(),
+                }
+            else:
+                track = tracker[symbol]
+                track["entry_price"] = entry
+                if current > track.get("peak_price", entry):
+                    track["peak_price"] = current
+                    track["peak_gain_pct"] = max(0.0, (current / entry - 1))
+
+            track = tracker[symbol]
+            gain = (current / entry - 1) if side == "long" else (1 - current / entry)
+            peak_gain = track.get("peak_gain_pct", 0.0)
             reason = None
-            if position.get("asset_class") == "crypto":
-                if entry and current:
-                    change = current / entry - 1
-                    if change <= -abs(stop_pct):
-                        reason = f"stop hit ({change:.1%})"
-                    elif change >= abs(target_pct):
-                        reason = f"target hit ({change:.1%})"
-            elif dte is not None and dte <= force_close_dte:
-                reason = f"DTE {dte} <= {force_close_dte}"
-            elif position["side"] == "long" and entry and current:
-                change = current / entry - 1
-                if change <= -abs(stop_pct):
-                    reason = f"stop hit ({change:.1%})"
-                elif change >= abs(target_pct):
-                    reason = f"target hit ({change:.1%})"
 
+            # --- A. CRYPTO POSITION DYNAMIC EXITS ---
+            if asset_kind == "crypto":
+                be_thresh = float(exits_cfg.get("crypto_breakeven_gain_pct", 0.03))
+                trail_act = float(exits_cfg.get("crypto_trailing_activation_pct", 0.04))
+                trail_pb = float(exits_cfg.get("crypto_trailing_pullback_pct", 0.02))
+                hard_stop = float(exits_cfg.get("crypto_hard_stop_pct", 0.06))
+                hard_target = float(exits_cfg.get("crypto_hard_target_pct", 0.12))
+
+                # 1. Breakeven Activation
+                if gain >= be_thresh and not track.get("breakeven_active"):
+                    track["breakeven_active"] = True
+                    logging.info(f"[{symbol}] Breakeven stop ACTIVATED (+{gain:.2%})")
+
+                # 2. Breakeven Stop Trigger (Lock capital once in profit)
+                if track.get("breakeven_active") and gain <= 0.002:
+                    reason = f"🛡️ Breakeven stop hit (secured profit, peak was +{peak_gain:.1%})"
+
+                # 3. Dynamic Trailing Stop (Protect peak profits)
+                elif peak_gain >= trail_act:
+                    pullback = (track["peak_price"] - current) / track["peak_price"]
+                    if pullback >= trail_pb:
+                        reason = f"📈 Trailing stop triggered (locked in +{gain:.1%}, pulled back {pullback:.1%} from peak)"
+
+                # 4. Active AI Council Re-Evaluation Exit
+                elif exits_cfg.get("council_reversal_exit", True):
+                    reversal = self._check_council_reversal(symbol, "crypto")
+                    if reversal:
+                        reason = f"🧠 AI Council reversal: {reversal} (early profit lock at {gain:+.1%})"
+
+                # 5. Hard Target / Hard Stop Fallbacks
+                elif gain >= hard_target:
+                    reason = f"🎯 Profit target hit (+{gain:.1%})"
+                elif gain <= -hard_stop:
+                    reason = f"🛑 Hard stop-loss hit ({gain:.1%})"
+
+            # --- B. OPTIONS POSITION DYNAMIC EXITS ---
+            elif asset_kind == "option":
+                dte = self._dte(symbol)
+                force_close_dte = int(exits_cfg.get("force_close_dte", 1))
+                opt_be_thresh = float(exits_cfg.get("options_breakeven_gain_pct", 0.20))
+                opt_trail_act = float(exits_cfg.get("options_trailing_activation_pct", 0.30))
+                opt_trail_pb = float(exits_cfg.get("options_trailing_pullback_pct", 0.15))
+                opt_stop = float(exits_cfg.get("stop_loss_pct", 0.35))
+                opt_target = float(exits_cfg.get("take_profit_pct", 0.60))
+
+                # 1. DTE Force Close (Avoid pin risk/assignment)
+                if dte is not None and dte <= force_close_dte:
+                    reason = f"⏳ DTE {dte} <= {force_close_dte} (expiration safety exit)"
+
+                # 2. Breakeven Activation & Trigger
+                elif gain >= opt_be_thresh and not track.get("breakeven_active"):
+                    track["breakeven_active"] = True
+                    logging.info(f"[{symbol}] Options Breakeven stop ACTIVATED (+{gain:.1%})")
+
+                if not reason and track.get("breakeven_active") and gain <= 0.02:
+                    reason = f"🛡️ Options Breakeven stop hit (secured capital, peak was +{peak_gain:.1%})"
+
+                # 3. Dynamic Trailing Stop on Options
+                elif not reason and peak_gain >= opt_trail_act:
+                    pullback = (track["peak_price"] - current) / track["peak_price"]
+                    if pullback >= opt_trail_pb:
+                        reason = f"📈 Options Trailing stop (locked in +{gain:.1%}, peak was +{peak_gain:.1%})"
+
+                # 4. Fallback Target & Stop
+                elif not reason and gain >= opt_target:
+                    reason = f"🎯 Options target hit (+{gain:.1%})"
+                elif not reason and gain <= -opt_stop:
+                    reason = f"🛑 Options stop-loss hit ({gain:.1%})"
+
+            # Execute Exit if Triggered
             if reason:
                 logging.info(f"Closing position {symbol}: {reason}")
                 ok = False if self.dry_run else self.broker.close_position(symbol)
@@ -393,11 +495,55 @@ class TradingEngine:
                     asset_kind,
                     "exit",
                     "close",
-                    int(position.get("qty", 1)),
+                    float(position.get("qty", 1)),
                     current,
                     "",
                     "closed-dryrun" if (self.dry_run and ok is False) else "closed",
                 )
+                if symbol in tracker:
+                    del tracker[symbol]
+
+        # Clean up tracker for closed positions
+        for sym in list(tracker.keys()):
+            if sym not in active_syms:
+                del tracker[sym]
+
+        self._save_tracking(tracker)
+
+    def _check_council_reversal(self, symbol: str, asset_class: str) -> str | None:
+        """Re-evaluates technical indicator health for an open position to spot reversals early."""
+        try:
+            timeframe = self.config.get("timeframe", "15Min")
+            bars = None
+            if self.broker:
+                if asset_class == "crypto":
+                    bars = self.broker.get_crypto_bars(symbol, timeframe=timeframe, days=5)
+                else:
+                    bars = self.broker.get_stock_bars(symbol, timeframe=timeframe, days=5)
+
+            if bars is None or len(bars) < 60:
+                return None
+
+            technicals = build_technical_context(bars, symbol)
+            hist = technicals.get("macd_hist", 0)
+            hist_slope = technicals.get("macd_hist_slope", "flat")
+            rsi_div = technicals.get("rsi_divergence")
+            ema_regime = technicals.get("ema50_regime")
+
+            # Check for strong bearish reversal confluence
+            bearish_signals = []
+            if rsi_div == "bearish":
+                bearish_signals.append("Bearish RSI divergence")
+            if hist < 0 and hist_slope == "falling":
+                bearish_signals.append("MACD negative momentum accelerating")
+            if ema_regime == "bearish":
+                bearish_signals.append("EMA50 breakdown")
+
+            if len(bearish_signals) >= 2:
+                return " + ".join(bearish_signals)
+        except Exception as exc:
+            logging.warning(f"Reversal check failed for {symbol}: {exc}")
+        return None
 
     @staticmethod
     def _dte(occ_symbol: str):
@@ -434,4 +580,3 @@ def _synthetic_bars():
             "volume": rng.integers(1e5, 5e5, n),
         }
     )
-

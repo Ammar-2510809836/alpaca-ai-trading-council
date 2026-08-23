@@ -25,14 +25,27 @@ risk:
   max_open_positions: 4
   max_risk_per_trade_pct: 0.01
   daily_loss_cap_pct: 0.03
+  max_single_asset_exposure_pct: 0.10
+  min_cash_reserve_pct: 0.20
 
 crypto:
   quote_allocation_pct: 0.02
-  max_total_exposure_pct: 0.10
+  max_total_exposure_pct: 0.20
 
 exits:
+  # Static fallback limits
   stop_loss_pct: 0.35
   take_profit_pct: 0.60
   force_close_dte: 1
+  # Dynamic trade management
+  crypto_breakeven_gain_pct: 0.03
+  crypto_trailing_activation_pct: 0.04
+  crypto_trailing_pullback_pct: 0.02
+  crypto_hard_stop_pct: 0.06
+  crypto_hard_target_pct: 0.12
+  options_breakeven_gain_pct: 0.20
+  options_trailing_activation_pct: 0.30
+  options_trailing_pullback_pct: 0.15
+  council_reversal_exit: true
 
 discord_webhook: ""

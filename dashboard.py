@@ -154,6 +154,17 @@ TRADE_COLUMNS = ["timestamp", "underlying", "symbol", "asset_class", "structure"
                  "direction", "qty", "limit_price", "client_order_id", "status"]
 
 
+def load_position_tracking():
+    path = os.path.join(BASE, "journals", "position_tracking.json")
+    if os.path.exists(path):
+        try:
+            with open(path, "r", encoding="utf-8") as handle:
+                return json.load(handle)
+        except Exception:
+            return {}
+    return {}
+
+
 def load_decisions(limit=40):
     path = os.path.join(BASE, "journals", "decisions.csv")
     if not os.path.exists(path):
@@ -433,14 +444,61 @@ with tab_council:
         st.caption("Full per-brain reasoning stored in journals/decisions.csv")
 
 with tab_exec:
-    left, right = st.columns(2)
+    # 1. Portfolio Diversification & Risk Allocation Bar
+    if account:
+        eq = float(account.get("equity", 0) or 0)
+        c_bal = float(account.get("cash", 0) or 0)
+        crypto_val = sum(
+            float(p.get("market_value", float(p.get("current_price", 0)) * float(p.get("qty", 0))))
+            for p in positions if p.get("asset_class") == "crypto"
+        )
+        stocks_val = sum(
+            float(p.get("market_value", float(p.get("current_price", 0)) * float(p.get("qty", 0))))
+            for p in positions if p.get("asset_class") != "crypto"
+        )
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Cash Reserve", money(c_bal), delta=f"{(c_bal/eq*100) if eq>0 else 0:.1f}% (Buffer >=20%)")
+        c2.metric("Crypto Exposure", money(crypto_val), delta=f"{(crypto_val/eq*100) if eq>0 else 0:.1f}% / 20% max cap", delta_color="normal" if (crypto_val/eq <= 0.20 if eq>0 else True) else "inverse")
+        c3.metric("Equities & Options", money(stocks_val), delta=f"{(stocks_val/eq*100) if eq>0 else 0:.1f}% allocation")
+        c4.metric("Active Risk Limit", "10% per Asset", delta="Dynamic Breakeven & Trailing")
+
+    st.divider()
+
+    left, right = st.columns([3, 2])
     with left:
-        st.subheader("Open positions")
+        st.subheader("Open positions & dynamic protection")
         if positions:
             pos_df = pd.DataFrame(positions)
+            tracking = load_position_tracking()
+
+            peak_prices = []
+            protections = []
+            return_pcts = []
+            for _, r in pos_df.iterrows():
+                sym = r.get("symbol", "")
+                entry = float(r.get("avg_entry_price") or 0)
+                curr = float(r.get("current_price") or entry)
+                ret = ((curr / entry - 1) * 100) if entry > 0 else 0.0
+                return_pcts.append(f"{ret:+.2f}%")
+
+                track = tracking.get(sym, {})
+                peak = float(track.get("peak_price") or curr)
+                peak_prices.append(f"${peak:,.2f}" if peak > 0 else f"${curr:,.2f}")
+
+                if track.get("breakeven_active"):
+                    protections.append("🛡️ Breakeven Active")
+                elif float(track.get("peak_gain_pct") or 0) >= 0.04:
+                    protections.append("📈 Trailing Stop Active")
+                else:
+                    protections.append("⏳ Dynamic Monitoring")
+
+            pos_df["return_pct"] = return_pcts
+            pos_df["peak_price"] = peak_prices
+            pos_df["protection_status"] = protections
+
             cols = [
-                c for c in ("symbol", "underlying", "side", "qty", "avg_entry_price",
-                            "current_price", "unrealized_pl")
+                c for c in ("symbol", "side", "qty", "avg_entry_price",
+                            "current_price", "return_pct", "peak_price", "unrealized_pl", "protection_status")
                 if c in pos_df.columns
             ]
             st.dataframe(pos_df[cols], width="stretch", hide_index=True)
