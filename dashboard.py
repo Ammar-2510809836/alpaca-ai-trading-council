@@ -495,9 +495,12 @@ with tab_exec:
         signals = []
         evaluated = []
         opened_times = []
+        all_recent_orders = broker.get_order_history(limit=50) if broker and hasattr(broker, "get_order_history") else []
+        eng_state = load_engine_state()
 
         for _, r in pos_df.iterrows():
             sym = r.get("symbol", "")
+            clean_sym = str(sym).replace("/", "").upper()
             entry = float(r.get("avg_entry_price") or 0)
             curr = float(r.get("current_price") or entry)
             ret = ((curr / entry - 1) * 100) if entry > 0 else 0.0
@@ -517,17 +520,30 @@ with tab_exec:
                 elif float(track.get("peak_gain_pct") or 0) >= 0.04:
                     plan = "📈 Trailing Stop Active"
                 else:
-                    plan = "⏳ Breakeven at +3.0%"
+                    needed = max(0.0, (0.03 - (ret / 100))) * 100
+                    plan = f"⏳ Breakeven at +3.0% (needs +{needed:.2f}%)"
             protections.append(plan)
 
-            # Open timestamp
+            # 1. Resolve exact Open Timestamp from tracking or broker fill history
             ent_time = track.get("entry_time")
+            if not ent_time and all_recent_orders:
+                matching = [
+                    o for o in all_recent_orders
+                    if str(o.get("symbol", "")).replace("/", "").upper() == clean_sym
+                    and o.get("side") == "BUY"
+                    and o.get("status") == "FILLED"
+                ]
+                if matching:
+                    ent_time = matching[0].get("filled_at") or matching[0].get("created_at")
+
             if ent_time:
                 opened_times.append(f"{str(ent_time)[:16].replace('T', ' ')} UTC ({format_relative_time(ent_time)})")
             else:
-                opened_times.append("Active")
+                opened_times.append(f"{format_relative_time(eng_state.get('timestamp'))}")
 
-            evaluated.append(format_relative_time(track.get("last_checked")))
+            # 2. Resolve exact Last Evaluated relative time
+            eval_t = track.get("last_checked") or eng_state.get("timestamp")
+            evaluated.append(format_relative_time(eval_t))
 
         pos_df["return_pct"] = return_pcts
         pos_df["ai_trend"] = trends

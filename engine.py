@@ -393,6 +393,20 @@ class TradingEngine:
             reversal = eval_res.get("reversal")
 
             if symbol not in tracker:
+                # Resolve true fill timestamp from broker orders
+                ent_time = None
+                if self.broker and hasattr(self.broker, "get_order_history"):
+                    clean_sym = symbol.replace("/", "").upper()
+                    orders = self.broker.get_order_history(limit=30)
+                    matching = [
+                        o for o in orders
+                        if o.get("symbol", "").replace("/", "").upper() == clean_sym
+                        and o.get("side") == "BUY"
+                        and o.get("status") == "FILLED"
+                    ]
+                    if matching:
+                        ent_time = matching[0].get("filled_at") or matching[0].get("created_at")
+
                 tracker[symbol] = {
                     "symbol": symbol,
                     "underlying": position.get("underlying", symbol),
@@ -401,7 +415,7 @@ class TradingEngine:
                     "peak_price": current,
                     "peak_gain_pct": max(0.0, (current / entry - 1)),
                     "breakeven_active": False,
-                    "entry_time": datetime.now(timezone.utc).isoformat(),
+                    "entry_time": ent_time or datetime.now(timezone.utc).isoformat(),
                     "last_checked": datetime.now(timezone.utc).isoformat(),
                     "trend_status": eval_res.get("trend_status", "🟢 Active"),
                     "trend_details": eval_res.get("trend_details", "Live"),
@@ -413,6 +427,17 @@ class TradingEngine:
                 track["last_checked"] = datetime.now(timezone.utc).isoformat()
                 track["trend_status"] = eval_res.get("trend_status", "🟢 Active")
                 track["trend_details"] = eval_res.get("trend_details", "Live")
+                if not track.get("entry_time") and self.broker and hasattr(self.broker, "get_order_history"):
+                    clean_sym = symbol.replace("/", "").upper()
+                    orders = self.broker.get_order_history(limit=30)
+                    matching = [
+                        o for o in orders
+                        if o.get("symbol", "").replace("/", "").upper() == clean_sym
+                        and o.get("side") == "BUY"
+                        and o.get("status") == "FILLED"
+                    ]
+                    if matching:
+                        track["entry_time"] = matching[0].get("filled_at") or matching[0].get("created_at")
                 if current > track.get("peak_price", entry):
                     track["peak_price"] = current
                     track["peak_gain_pct"] = max(0.0, (current / entry - 1))
