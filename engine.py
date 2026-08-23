@@ -185,9 +185,6 @@ class TradingEngine:
             if str(p.get("underlying", "")).replace("/", "").upper() == clean_sym
             or str(p.get("symbol", "")).replace("/", "").upper() == clean_sym
         ]
-        if existing:
-            logging.info(f"{symbol}: already holding {len(existing)} position(s), skipping duplicate entry")
-            return
 
         timeframe = self.config.get("timeframe", "15Min")
         lookback = int(self.config.get("lookback_days", 10))

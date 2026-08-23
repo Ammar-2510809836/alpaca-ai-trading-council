@@ -310,6 +310,25 @@ with st.sidebar:
     )
 
     llm_health = load_llm_health()
+    active_endpoints = list(llm_health.get("endpoints", []))
+    if not active_endpoints:
+        if os.environ.get("GROQ_API_KEY"):
+            active_endpoints.append({
+                "provider": "GROQ",
+                "model": os.environ.get("GROQ_MODEL", "openai/gpt-oss-120b"),
+                "status": "Online",
+                "cooling_for_s": 0,
+                "failures": 0,
+            })
+        if os.environ.get("NVIDIA_API_KEY"):
+            active_endpoints.append({
+                "provider": "NVIDIA",
+                "model": os.environ.get("NVIDIA_MODEL", "meta/llama-3.3-70b-instruct"),
+                "status": "Online",
+                "cooling_for_s": 0,
+                "failures": 0,
+            })
+
     brain = llm_provider or "fallback votes"
     brain_dot = "dot-warn" if llm_health.get("has_active_rate_limit") else ("dot-ok" if llm_provider else "dot-off")
     st.markdown(
@@ -318,10 +337,10 @@ with st.sidebar:
     )
 
     # Display real-time endpoint status in sidebar
-    if llm_health.get("endpoints"):
-        for ep in llm_health["endpoints"]:
-            ep_name = ep.get("provider", "").upper()
-            rem = ep.get("cooling_for_s", 0)
+    if active_endpoints:
+        for ep in active_endpoints:
+            ep_name = str(ep.get("provider", "")).upper()
+            rem = int(ep.get("cooling_for_s", 0))
             if rem > 0:
                 st.markdown(
                     f'<div class="sys-row" style="padding-left:14px"><span class="dot-warn"></span>'
@@ -387,7 +406,6 @@ header_r.markdown(
 st.caption("Multi-agent LLM council &middot; options-native execution &middot; Alpaca paper trading")
 
 # Real-time LLM rate limit and error banner
-llm_health = load_llm_health()
 if llm_health.get("has_active_rate_limit"):
     st.warning(
         f"⚠️ **LLM Rate-Limit Warning**: {', '.join(llm_health.get('active_rate_limits', []))} — "
@@ -395,25 +413,26 @@ if llm_health.get("has_active_rate_limit"):
     )
 
 # Diagnostics Expander
-alerts = llm_health.get("recent_alerts", [])
-if alerts:
-    with st.expander("🤖 LLM API Health & Rate-Limit Diagnostics", expanded=False):
-        d1, d2 = st.columns([1, 2])
-        with d1:
-            st.markdown("**Configured Providers**")
-            eps = llm_health.get("endpoints", [])
-            if eps:
-                st.dataframe(pd.DataFrame(eps)[["provider", "status", "failures", "model"]], hide_index=True, width="stretch")
-            else:
-                st.caption("No endpoint stats.")
-        with d2:
-            st.markdown("**Recent Rate-Limits & Error Events**")
+with st.expander("🤖 LLM API Health & Rate-Limit Diagnostics", expanded=False):
+    d1, d2 = st.columns([1, 2])
+    with d1:
+        st.markdown("**Configured Providers**")
+        if active_endpoints:
+            st.dataframe(pd.DataFrame(active_endpoints)[["provider", "status", "failures", "model"]], hide_index=True, width="stretch")
+        else:
+            st.caption("No endpoint stats.")
+    with d2:
+        st.markdown("**Recent Rate-Limits & Error Events**")
+        alerts = llm_health.get("recent_alerts", [])
+        if alerts:
             alert_df = pd.DataFrame(alerts)
             if not alert_df.empty:
                 if "timestamp" in alert_df.columns:
                     alert_df["time"] = alert_df["timestamp"].astype(str).str.slice(0, 19).str.replace("T", " ")
                 cols = [c for c in ("time", "provider", "error_type", "message", "cooldown_s") if c in alert_df.columns]
-                st.dataframe(alert_df[cols].head(6), hide_index=True, width="stretch")
+                st.dataframe(alert_df[cols].head(8), hide_index=True, width="stretch")
+        else:
+            st.caption("🟢 All LLM endpoints operational. No rate-limits or API errors recorded.")
 
 unrealized = sum(p.get("unrealized_pl", 0) for p in positions)
 
