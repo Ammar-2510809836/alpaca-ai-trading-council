@@ -9,7 +9,16 @@ import time
 import webbrowser
 
 BASE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, BASE)
+if BASE not in sys.path:
+    sys.path.insert(0, BASE)
+
+# When executed by Streamlit Cloud (streamlit run app.py), delegate directly to dashboard
+try:
+    import streamlit.runtime
+    if streamlit.runtime.exists():
+        import dashboard  # noqa: F401
+except Exception:
+    pass
 
 VENV_PYTHON = os.path.join(BASE, ".venv")
 
@@ -186,4 +195,12 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    is_streamlit = False
+    try:
+        import streamlit.runtime
+        is_streamlit = bool(streamlit.runtime.exists())
+    except Exception:
+        pass
+
+    if not is_streamlit:
+        main()

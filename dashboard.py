@@ -1,4 +1,4 @@
-﻿import json
+import json
 import os
 from datetime import datetime, timezone
 
@@ -9,6 +9,15 @@ from dotenv import load_dotenv
 
 load_dotenv()
 BASE = os.path.dirname(os.path.abspath(__file__))
+
+# Bridge Streamlit Cloud Secrets into os.environ
+try:
+    if hasattr(st, "secrets"):
+        for _k, _v in st.secrets.items():
+            if isinstance(_v, str) and _k not in os.environ:
+                os.environ[_k] = _v
+except Exception:
+    pass
 
 st.set_page_config(
     page_title="AI Trading Council",
@@ -200,6 +209,28 @@ llm_provider = (
                 else ("OpenAI" if os.environ.get("OPENAI_API_KEY") else None)))
 )
 
+@st.cache_resource
+def start_background_trading_engine():
+    if not (os.environ.get("ALPACA_API_KEY") and os.environ.get("ALPACA_SECRET_KEY")):
+        return False
+    try:
+        import threading
+        from run import build
+        from engine import TradingEngine
+        
+        cfg = load_config()
+        b_client, m_bridge, l_client = build(cfg, dry_run=False)
+        if b_client:
+            eng = TradingEngine(b_client, m_bridge, l_client, cfg, dry_run=False)
+            t = threading.Thread(target=eng.run_forever, name="engine-worker", daemon=True)
+            t.start()
+            return True
+    except Exception as exc:
+        print(f"Background engine startup note: {exc}")
+    return False
+
+start_background_trading_engine()
+
 broker = None
 if has_alpaca:
     try:
@@ -223,7 +254,7 @@ with st.sidebar:
     running = phase not in ("", "idle")
     dot_cls = "live-dot" if running else "idle-dot"
     st.markdown(
-        f'<div style="padding:10px 0">{dot_cls}'
+        f'<div style="padding:10px 0"><span class="{dot_cls}"></span>'
         f'<span class="phase-pill">{label}</span></div>',
         unsafe_allow_html=True,
     )
