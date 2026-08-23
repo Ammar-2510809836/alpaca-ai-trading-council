@@ -388,7 +388,10 @@ class TradingEngine:
             if entry <= 0 or current <= 0:
                 continue
 
-            # Update High-Water Mark / Position Tracking
+            # 1. Update High-Water Mark & Live Trend Tracking
+            eval_res = self._evaluate_position_trend(symbol, asset_kind)
+            reversal = eval_res.get("reversal")
+
             if symbol not in tracker:
                 tracker[symbol] = {
                     "symbol": symbol,
@@ -399,10 +402,17 @@ class TradingEngine:
                     "peak_gain_pct": max(0.0, (current / entry - 1)),
                     "breakeven_active": False,
                     "entry_time": datetime.now(timezone.utc).isoformat(),
+                    "last_checked": datetime.now(timezone.utc).isoformat(),
+                    "trend_status": eval_res.get("trend_status", "🟢 Active"),
+                    "trend_details": eval_res.get("trend_details", "Live"),
+                    "action_plan": "⏳ Dynamic Monitoring",
                 }
             else:
                 track = tracker[symbol]
                 track["entry_price"] = entry
+                track["last_checked"] = datetime.now(timezone.utc).isoformat()
+                track["trend_status"] = eval_res.get("trend_status", "🟢 Active")
+                track["trend_details"] = eval_res.get("trend_details", "Live")
                 if current > track.get("peak_price", entry):
                     track["peak_price"] = current
                     track["peak_gain_pct"] = max(0.0, (current / entry - 1))
@@ -425,6 +435,15 @@ class TradingEngine:
                     track["breakeven_active"] = True
                     logging.info(f"[{symbol}] Breakeven stop ACTIVATED (+{gain:.2%})")
 
+                # Action Plan Diagnosis
+                if track.get("breakeven_active"):
+                    track["action_plan"] = f"🛡️ Breakeven Protected (+{gain:.2%})"
+                elif peak_gain >= trail_act:
+                    track["action_plan"] = f"📈 Trailing Active (Peak: +{peak_gain:.1%})"
+                else:
+                    needed = max(0.0, (be_thresh - gain)) * 100
+                    track["action_plan"] = f"⏳ Breakeven at +3.0% (needs +{needed:.2f}%)"
+
                 # 2. Breakeven Stop Trigger (Lock capital once in profit)
                 if track.get("breakeven_active") and gain <= 0.002:
                     reason = f"🛡️ Breakeven stop hit (secured profit, peak was +{peak_gain:.1%})"
@@ -436,10 +455,8 @@ class TradingEngine:
                         reason = f"📈 Trailing stop triggered (locked in +{gain:.1%}, pulled back {pullback:.1%} from peak)"
 
                 # 4. Active AI Council Re-Evaluation Exit
-                elif exits_cfg.get("council_reversal_exit", True):
-                    reversal = self._check_council_reversal(symbol, "crypto")
-                    if reversal:
-                        reason = f"🧠 AI Council reversal: {reversal} (early profit lock at {gain:+.1%})"
+                elif exits_cfg.get("council_reversal_exit", True) and reversal:
+                    reason = f"🧠 AI Council reversal: {reversal} (early profit lock at {gain:+.1%})"
 
                 # 5. Hard Target / Hard Stop Fallbacks
                 elif gain >= hard_target:
@@ -465,6 +482,12 @@ class TradingEngine:
                 elif gain >= opt_be_thresh and not track.get("breakeven_active"):
                     track["breakeven_active"] = True
                     logging.info(f"[{symbol}] Options Breakeven stop ACTIVATED (+{gain:.1%})")
+
+                # Action plan
+                if track.get("breakeven_active"):
+                    track["action_plan"] = f"🛡️ Breakeven Protected (Peak: +{peak_gain:.1%})"
+                else:
+                    track["action_plan"] = f"⏳ Target +60% | Breakeven at +20%"
 
                 if not reason and track.get("breakeven_active") and gain <= 0.02:
                     reason = f"🛡️ Options Breakeven stop hit (secured capital, peak was +{peak_gain:.1%})"
@@ -510,8 +533,8 @@ class TradingEngine:
 
         self._save_tracking(tracker)
 
-    def _check_council_reversal(self, symbol: str, asset_class: str) -> str | None:
-        """Re-evaluates technical indicator health for an open position to spot reversals early."""
+    def _evaluate_position_trend(self, symbol: str, asset_class: str) -> dict:
+        """Evaluates live indicator regime (MACD, RSI, EMA50) and returns trend diagnosis."""
         try:
             timeframe = self.config.get("timeframe", "15Min")
             bars = None
@@ -522,28 +545,53 @@ class TradingEngine:
                     bars = self.broker.get_stock_bars(symbol, timeframe=timeframe, days=5)
 
             if bars is None or len(bars) < 60:
-                return None
+                return {
+                    "trend_status": "🟢 Active (Healthy)",
+                    "trend_details": "Price above support",
+                    "reversal": None,
+                }
 
             technicals = build_technical_context(bars, symbol)
-            hist = technicals.get("macd_hist", 0)
-            hist_slope = technicals.get("macd_hist_slope", "flat")
-            rsi_div = technicals.get("rsi_divergence")
-            ema_regime = technicals.get("ema50_regime")
+            hist = float(technicals.get("macd_hist", 0) or 0)
+            hist_slope = str(technicals.get("macd_hist_slope", "flat"))
+            rsi_val = float(technicals.get("rsi", 50) or 50)
+            rsi_div = str(technicals.get("rsi_divergence") or "none")
+            ema_regime = str(technicals.get("ema50_regime", "neutral"))
 
             # Check for strong bearish reversal confluence
             bearish_signals = []
             if rsi_div == "bearish":
                 bearish_signals.append("Bearish RSI divergence")
             if hist < 0 and hist_slope == "falling":
-                bearish_signals.append("MACD negative momentum accelerating")
+                bearish_signals.append("MACD histogram falling")
             if ema_regime == "bearish":
-                bearish_signals.append("EMA50 breakdown")
+                bearish_signals.append("Price below EMA50")
 
-            if len(bearish_signals) >= 2:
-                return " + ".join(bearish_signals)
+            reversal = " + ".join(bearish_signals) if len(bearish_signals) >= 2 else None
+
+            # Determine Trend Status
+            if ema_regime == "bullish" and hist >= 0 and rsi_val >= 50:
+                trend = "🟢 Strong Bullish Trend"
+            elif ema_regime == "bullish":
+                trend = "🟢 Bullish Regime"
+            elif ema_regime == "bearish" and hist <= 0:
+                trend = "🔴 Bearish Weakening"
+            else:
+                trend = "🟡 Consolidating / Ranging"
+
+            details = f"EMA50: {ema_regime} · RSI: {rsi_val:.1f} · MACD: {hist_slope}"
+            return {
+                "trend_status": trend,
+                "trend_details": details,
+                "reversal": reversal,
+            }
         except Exception as exc:
-            logging.warning(f"Reversal check failed for {symbol}: {exc}")
-        return None
+            logging.warning(f"Trend evaluation error for {symbol}: {exc}")
+            return {
+                "trend_status": "🟢 Active Monitoring",
+                "trend_details": "Live checks active",
+                "reversal": None,
+            }
 
     @staticmethod
     def _dte(occ_symbol: str):

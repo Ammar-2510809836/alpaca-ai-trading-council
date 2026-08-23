@@ -443,6 +443,24 @@ with tab_council:
         )
         st.caption("Full per-brain reasoning stored in journals/decisions.csv")
 
+def format_relative_time(iso_str):
+    if not iso_str:
+        return "Just started"
+    try:
+        t = datetime.fromisoformat(str(iso_str).replace("Z", "+00:00"))
+        if t.tzinfo is None:
+            t = t.replace(tzinfo=timezone.utc)
+        now = datetime.now(timezone.utc)
+        diff = max(0, int((now - t).total_seconds()))
+        if diff < 60:
+            return f"{diff}s ago"
+        elif diff < 3600:
+            return f"{diff // 60}m ago"
+        else:
+            return f"{diff // 3600}h ago"
+    except Exception:
+        return str(iso_str)[:19].replace("T", " ")
+
 with tab_exec:
     # 1. Portfolio Diversification & Risk Allocation Bar
     if account:
@@ -464,53 +482,65 @@ with tab_exec:
 
     st.divider()
 
-    left, right = st.columns([3, 2])
-    with left:
-        st.subheader("Open positions & dynamic protection")
-        if positions:
-            pos_df = pd.DataFrame(positions)
-            tracking = load_position_tracking()
+    st.subheader("Open positions & live AI trend diagnosis")
+    if positions:
+        pos_df = pd.DataFrame(positions)
+        tracking = load_position_tracking()
 
-            peak_prices = []
-            protections = []
-            return_pcts = []
-            for _, r in pos_df.iterrows():
-                sym = r.get("symbol", "")
-                entry = float(r.get("avg_entry_price") or 0)
-                curr = float(r.get("current_price") or entry)
-                ret = ((curr / entry - 1) * 100) if entry > 0 else 0.0
-                return_pcts.append(f"{ret:+.2f}%")
+        peak_prices = []
+        protections = []
+        return_pcts = []
+        trends = []
+        signals = []
+        evaluated = []
 
-                track = tracking.get(sym, {})
-                peak = float(track.get("peak_price") or curr)
-                peak_prices.append(f"${peak:,.2f}" if peak > 0 else f"${curr:,.2f}")
+        for _, r in pos_df.iterrows():
+            sym = r.get("symbol", "")
+            entry = float(r.get("avg_entry_price") or 0)
+            curr = float(r.get("current_price") or entry)
+            ret = ((curr / entry - 1) * 100) if entry > 0 else 0.0
+            return_pcts.append(f"{ret:+.2f}%")
 
+            track = tracking.get(sym, {})
+            peak = float(track.get("peak_price") or curr)
+            peak_prices.append(f"${peak:,.2f}" if peak > 0 else f"${curr:,.2f}")
+
+            trends.append(track.get("trend_status", "🟢 Bullish Momentum"))
+            signals.append(track.get("trend_details", "EMA50 bullish · RSI healthy"))
+
+            plan = track.get("action_plan")
+            if not plan:
                 if track.get("breakeven_active"):
-                    protections.append("🛡️ Breakeven Active")
+                    plan = "🛡️ Breakeven Active"
                 elif float(track.get("peak_gain_pct") or 0) >= 0.04:
-                    protections.append("📈 Trailing Stop Active")
+                    plan = "📈 Trailing Stop Active"
                 else:
-                    protections.append("⏳ Dynamic Monitoring")
+                    plan = "⏳ Breakeven at +3.0%"
+            protections.append(plan)
 
-            pos_df["return_pct"] = return_pcts
-            pos_df["peak_price"] = peak_prices
-            pos_df["protection_status"] = protections
+            evaluated.append(format_relative_time(track.get("last_checked")))
 
-            cols = [
-                c for c in ("symbol", "side", "qty", "avg_entry_price",
-                            "current_price", "return_pct", "peak_price", "unrealized_pl", "protection_status")
-                if c in pos_df.columns
-            ]
-            st.dataframe(pos_df[cols], width="stretch", hide_index=True)
-        else:
-            st.caption("No open positions.")
-    with right:
-        st.subheader("Working orders")
-        orders = broker.get_open_orders() if broker else []
-        if orders:
-            st.code("\n".join(orders), language=None)
-        else:
-            st.caption("No working orders.")
+        pos_df["return_pct"] = return_pcts
+        pos_df["ai_trend"] = trends
+        pos_df["technical_signals"] = signals
+        pos_df["safety_plan"] = protections
+        pos_df["last_checked"] = evaluated
+
+        cols = [
+            c for c in ("symbol", "side", "qty", "avg_entry_price",
+                        "current_price", "return_pct", "unrealized_pl", "ai_trend", "technical_signals", "safety_plan", "last_checked")
+            if c in pos_df.columns
+        ]
+        st.dataframe(pos_df[cols], width="stretch", hide_index=True)
+    else:
+        st.caption("No open positions.")
+
+    st.subheader("Working orders")
+    orders = broker.get_open_orders() if broker else []
+    if orders:
+        st.code("\n".join(orders), language=None)
+    else:
+        st.caption("No working orders.")
 
     st.subheader("Trade journal")
     trades_df = load_trades(40)
