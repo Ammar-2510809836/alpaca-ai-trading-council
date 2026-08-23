@@ -26,8 +26,11 @@ class RiskGovernor(Brain):
             return f"Max open positions reached ({len(positions)}/{max_positions})"
 
         if proposal is not None:
+            clean_underlying = str(proposal.underlying or "").replace("/", "").upper()
             same_underlying = [
-                p for p in positions if p.get("underlying") == proposal.underlying
+                p for p in positions
+                if str(p.get("underlying", "")).replace("/", "").upper() == clean_underlying
+                or str(p.get("symbol", "")).replace("/", "").upper() == clean_underlying
             ]
             if same_underlying:
                 return f"Already exposed to {proposal.underlying}"
@@ -52,6 +55,10 @@ class RiskGovernor(Brain):
                 )
 
         if proposal is not None and proposal.asset_class == "crypto":
+            cash = account.get("cash", 0)
+            if (proposal.max_debit or 0) > cash:
+                return f"Insufficient cash (${cash:,.2f} available < ${proposal.max_debit or 0:,.2f} required)"
+
             equity = account.get("equity", 0)
             crypto_cap = float(
                 (self.config.get("crypto") or {}).get("max_total_exposure_pct", 0.10)

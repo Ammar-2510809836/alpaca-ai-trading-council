@@ -1,4 +1,4 @@
-﻿import json
+import json
 import logging
 import os
 import time
@@ -115,6 +115,8 @@ class TradingEngine:
 
         self._write_state("exits", "Checking stop / target / DTE exits on open options")
         self.manage_exits(positions)
+        self._write_state("exits", "Checking stop / target / DTE exits on open options")
+        self.manage_exits(positions)
         self._write_state(
             "idle",
             f"Sleeping {int(self.config.get('cycle_seconds', 300))}s until next cycle",
@@ -153,14 +155,19 @@ class TradingEngine:
         return stocks, cryptos
 
     def _evaluate_symbol(self, symbol, clock, account, positions, asset_class="stock"):
+        clean_sym = symbol.replace("/", "").upper()
         pending = self.broker.get_open_orders() if self.broker else []
-        if any(s == symbol or s.startswith(symbol) for s in pending):
-            logging.info(f"{symbol}: order already working ({sum(1 for s in pending if s.startswith(symbol))}), skipping")
+        if any(clean_sym == str(s).replace("/", "").upper() or str(s).replace("/", "").upper().startswith(clean_sym) for s in pending):
+            logging.info(f"{symbol}: order already working, skipping")
             return
 
-        existing = [p for p in positions if p.get("underlying") == symbol]
+        existing = [
+            p for p in positions
+            if str(p.get("underlying", "")).replace("/", "").upper() == clean_sym
+            or str(p.get("symbol", "")).replace("/", "").upper() == clean_sym
+        ]
         if existing:
-            logging.info(f"{symbol}: already holding {len(existing)} position(s), skipping")
+            logging.info(f"{symbol}: already holding {len(existing)} position(s), skipping duplicate entry")
             return
 
         timeframe = self.config.get("timeframe", "15Min")
@@ -173,7 +180,7 @@ class TradingEngine:
         )
 
         if self.broker is None:
-            bars = _synthetic_bars()
+            bars = None
         elif asset_class == "crypto":
             bars = self.broker.get_crypto_bars(symbol, timeframe=timeframe, days=lookback)
         else:
