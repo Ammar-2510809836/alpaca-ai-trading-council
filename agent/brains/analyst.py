@@ -4,38 +4,48 @@ from agent.brains.base import Brain
 from agent.models import Vote
 from signals.macd_v4 import format_technical_summary
 
-SYSTEM_PROMPT = """You are the Technical Analyst brain inside an autonomous options-trading council.
-You receive a technical snapshot computed from closed 15-minute bars (MACD state, RSI with divergence flags,
-fractal market structure, and higher-timeframe EMA regimes).
+SYSTEM_PROMPT = """You are the Technical Analyst brain inside an autonomous algorithmic trading council.
+You receive a technical snapshot computed from closed 15-minute bars.
 
-Your job: judge whether evidence supports a directional bias for a SHORT-DATED OPTIONS position over the
-next few days. Options decay fast, so require confluence rather than acting on one indicator.
+CORE STRATEGY: EMA 9 & EMA 21 Crossover Strategy.
+- PRIMARY BUY TRIGGER: 9 EMA crosses ABOVE 21 EMA (or 9 EMA > 21 EMA with strong expanding positive spread) -> BULLISH.
+- PRIMARY SELL / EXIT TRIGGER: 9 EMA crosses BELOW 21 EMA (or 9 EMA < 21 EMA with negative momentum) -> BEARISH.
+- CONFLUENCE CONFIRMATION: Use MACD crossover, RSI divergence, and Hourly EMA50 to confirm momentum.
 
 Respond ONLY with JSON:
 {"direction": "bullish" | "bearish" | "neutral",
  "confidence": 0.0-1.0,
- "reasoning": "2-4 sentences citing specific signals"}
+ "reasoning": "2-4 sentences explicitly stating EMA 9 vs EMA 21 relationship and confirming signals"}
 
 Rules of thumb:
-- MACD cross aligned with hourly/daily regime and structure trend is strong.
-- RSI divergence AGAINST the crossover is a warning; reduce confidence or flip to neutral.
-- If evidence conflicts, say neutral with low confidence."""
+- Bullish EMA 9/21 cross aligned with MACD or price above EMA50 is high confidence (0.65 - 0.85).
+- Bearish EMA 9/21 cross indicates immediate trend exhaustion or downside reversal.
+- If EMA 9/21 is neutral or conflicting with other indicators, reduce confidence."""
 
 
 def _fallback_vote(context) -> Vote:
     ctx = context.get("technicals", {})
     score = 0
+
+    # 1. Primary: EMA 9 & 21 Crossover
+    if ctx.get("ema_9_21_crossover") == "bullish":
+        score += 3
+    elif ctx.get("ema_9_21_crossover") == "bearish":
+        score -= 3
+
+    if ctx.get("ema_9_21_regime") == "bullish":
+        score += 1
+    elif ctx.get("ema_9_21_regime") == "bearish":
+        score -= 1
+
+    # 2. Confluence: MACD, RSI, HTF
     if ctx.get("macd_crossover") == "bullish":
-        score += 2
+        score += 1
     elif ctx.get("macd_crossover") == "bearish":
-        score -= 2
+        score -= 1
     if ctx.get("htf_hourly_trend") == "bullish":
         score += 1
     elif ctx.get("htf_hourly_trend") == "bearish":
-        score -= 1
-    if ctx.get("htf_daily_trend") == "bullish":
-        score += 1
-    elif ctx.get("htf_daily_trend") == "bearish":
         score -= 1
     if ctx.get("rsi_bullish_divergence"):
         score += 1
@@ -43,10 +53,10 @@ def _fallback_vote(context) -> Vote:
         score -= 1
 
     if score >= 3:
-        return Vote("technical-analyst", "bullish", 0.55, "Deterministic fallback: MACD + regime alignment")
+        return Vote("technical-analyst", "bullish", 0.70, "Deterministic fallback: EMA 9/21 Bullish Cross + Momentum")
     if score <= -3:
-        return Vote("technical-analyst", "bearish", 0.55, "Deterministic fallback: MACD + regime alignment")
-    return Vote("technical-analyst", "neutral", 0.2, "Deterministic fallback: mixed signals")
+        return Vote("technical-analyst", "bearish", 0.70, "Deterministic fallback: EMA 9/21 Bearish Cross + Momentum")
+    return Vote("technical-analyst", "neutral", 0.2, "Deterministic fallback: EMA 9/21 neutral / mixed signals")
 
 
 class TechnicalAnalyst(Brain):

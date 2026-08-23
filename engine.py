@@ -578,30 +578,43 @@ class TradingEngine:
             hist_slope = str(technicals.get("macd_hist_slope", "flat"))
             rsi_val = float(technicals.get("rsi", 50) or 50)
             rsi_div = str(technicals.get("rsi_divergence") or "none")
-            ema_regime = str(technicals.get("ema50_regime", "neutral"))
+            htf_regime = str(technicals.get("htf_hourly_trend", "neutral"))
 
-            # Check for strong bearish reversal confluence
-            bearish_signals = []
-            if rsi_div == "bearish":
-                bearish_signals.append("Bearish RSI divergence")
-            if hist < 0 and hist_slope == "falling":
-                bearish_signals.append("MACD histogram falling")
-            if ema_regime == "bearish":
-                bearish_signals.append("Price below EMA50")
+            # Primary Strategy: EMA 9 & 21 Crossover & Regime
+            ema_cross = technicals.get("ema_9_21_crossover")
+            ema_regime = technicals.get("ema_9_21_regime", "neutral")
+            ema_spread = float(technicals.get("ema_spread_pct", 0) or 0)
 
-            reversal = " + ".join(bearish_signals) if len(bearish_signals) >= 2 else None
+            # Check for strong bearish reversal / exit signals
+            reversal = None
+            if ema_cross == "bearish":
+                reversal = "EMA 9 crossed below EMA 21 (Bearish Death Cross Exit)"
+            else:
+                bearish_signals = []
+                if ema_regime == "bearish":
+                    bearish_signals.append("EMA 9 < 21")
+                if rsi_div == "bearish":
+                    bearish_signals.append("Bearish RSI divergence")
+                if hist < 0 and hist_slope == "falling":
+                    bearish_signals.append("MACD histogram falling")
+                if len(bearish_signals) >= 2:
+                    reversal = " + ".join(bearish_signals)
 
             # Determine Trend Status
-            if ema_regime == "bullish" and hist >= 0 and rsi_val >= 50:
-                trend = "🟢 Strong Bullish Trend"
+            if ema_cross == "bullish":
+                trend = "🟢 EMA 9/21 Bullish Cross"
+            elif ema_regime == "bullish" and ema_spread >= 0.2:
+                trend = "🟢 Strong Bullish Trend (9 > 21)"
             elif ema_regime == "bullish":
-                trend = "🟢 Bullish Regime"
-            elif ema_regime == "bearish" and hist <= 0:
-                trend = "🔴 Bearish Weakening"
+                trend = "🟢 Bullish (EMA 9 > 21)"
+            elif ema_cross == "bearish":
+                trend = "🔴 EMA 9/21 Bearish Cross"
+            elif ema_regime == "bearish":
+                trend = "🔴 Bearish (EMA 9 < 21)"
             else:
                 trend = "🟡 Consolidating / Ranging"
 
-            details = f"EMA50: {ema_regime} · RSI: {rsi_val:.1f} · MACD: {hist_slope}"
+            details = f"EMA 9/21: {ema_regime} ({ema_spread:+.2f}%) · RSI: {rsi_val:.1f} · MACD: {hist_slope}"
             return {
                 "trend_status": trend,
                 "trend_details": details,

@@ -1,4 +1,4 @@
-from indicators.ema import calculate_ema
+from indicators.ema import calculate_ema, calculate_ema_crossover
 from indicators.fractal_structure import detect_fractals
 from indicators.macd import calculate_macd, detect_macd_crossover, resample_ohlc
 from indicators.rsi import calculate_rsi, detect_rsi_divergence
@@ -9,6 +9,11 @@ def build_technical_context(df, symbol: str) -> dict:
         "symbol": symbol,
         "price": float(df["close"].iloc[-1]),
         "bars_analyzed": len(df),
+        "ema_9_21_crossover": None,
+        "ema_9_21_regime": "neutral",
+        "ema_9": None,
+        "ema_21": None,
+        "ema_spread_pct": 0.0,
         "macd_crossover": None,
         "macd_histogram_trend": None,
         "rsi": None,
@@ -22,6 +27,15 @@ def build_technical_context(df, symbol: str) -> dict:
         "swing_high": None,
     }
 
+    # 1. Primary Strategy: EMA 9 & 21 Crossover
+    ema_res = calculate_ema_crossover(df, fast_period=9, slow_period=21)
+    ctx["ema_9_21_crossover"] = ema_res["crossover"]
+    ctx["ema_9_21_regime"] = ema_res["regime"]
+    ctx["ema_9"] = ema_res["fast_ema"]
+    ctx["ema_21"] = ema_res["slow_ema"]
+    ctx["ema_spread_pct"] = ema_res["spread_pct"]
+
+    # 2. Confluence Signals: MACD, RSI, HTF Trends
     macd, signal, histogram = calculate_macd(df)
     ctx["macd_crossover"] = detect_macd_crossover(macd, signal)
     if histogram is not None and len(histogram) >= 4:
@@ -75,7 +89,9 @@ def format_technical_summary(ctx: dict) -> str:
     lines = [
         f"Symbol: {ctx['symbol']}",
         f"Last price: {ctx['price']}",
-        f"MACD crossover (latest closed bar): {ctx.get('macd_crossover') or 'none'}",
+        f"PRIMARY STRATEGY - EMA 9/21 Crossover: {ctx.get('ema_9_21_crossover') or 'none'}",
+        f"EMA 9/21 Regime: {ctx.get('ema_9_21_regime')} (EMA9: {ctx.get('ema_9')} vs EMA21: {ctx.get('ema_21')}, spread: {ctx.get('ema_spread_pct'):+.2f}%)",
+        f"MACD crossover: {ctx.get('macd_crossover') or 'none'}",
         f"MACD histogram trend: {ctx.get('macd_histogram_trend') or 'flat'}",
         f"RSI(14): {ctx.get('rsi')}",
         f"Bullish RSI divergence in window: {ctx.get('rsi_bullish_divergence')}",
