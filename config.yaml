@@ -33,19 +33,26 @@ crypto:
   max_total_exposure_pct: 0.20
 
 exits:
-  # Static fallback limits
-  stop_loss_pct: 0.35
-  take_profit_pct: 0.60
-  force_close_dte: 1
-  # Dynamic trade management
-  crypto_breakeven_gain_pct: 0.03
+  # Multi-Stage Partial Take-Profit Scaling
+  crypto_tp1_gain_pct: 0.03       # +3.0% gain -> Close 50%, move SL to Breakeven
+  crypto_tp2_gain_pct: 0.06       # +6.0% gain -> Close 30%, trail SL
+  crypto_tp3_gain_pct: 0.10       # +10.0% gain -> Close remaining 20% runner
+  crypto_tp1_ratio: 0.50          # 50%
+  crypto_tp2_ratio: 0.30          # 30%
+  crypto_tp3_ratio: 0.20          # 20%
+  
+  options_tp1_gain_pct: 0.20      # +20% gain -> Close 50%, move SL to Breakeven
+  options_tp2_gain_pct: 0.35      # +35% gain -> Close 30%, trail SL
+  options_tp3_gain_pct: 0.60      # +60% gain -> Close remaining 20% runner
+
+  # Dynamic Exits & Trailing Protections
   crypto_trailing_activation_pct: 0.04
   crypto_trailing_pullback_pct: 0.02
-  crypto_hard_stop_pct: 0.06
-  crypto_hard_target_pct: 0.12
-  options_breakeven_gain_pct: 0.20
+  crypto_hard_stop_pct: 0.05
   options_trailing_activation_pct: 0.30
   options_trailing_pullback_pct: 0.15
+  options_hard_stop_pct: 0.35
+  force_close_dte: 1
   council_reversal_exit: true
 
 discord_webhook: ""

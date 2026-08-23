@@ -440,93 +440,147 @@ class TradingEngine:
                     track["peak_gain_pct"] = max(0.0, (current / entry - 1))
 
             track = tracker[symbol]
+            qty = float(position.get("qty", 1.0))
+            if "initial_qty" not in track:
+                track["initial_qty"] = qty
+            init_qty = float(track.get("initial_qty", qty))
+
             gain = (current / entry - 1) if side == "long" else (1 - current / entry)
             peak_gain = track.get("peak_gain_pct", 0.0)
             reason = None
 
-            # --- A. CRYPTO POSITION DYNAMIC EXITS ---
+            # --- A. CRYPTO POSITION MULTI-STAGE EXITS ---
             if asset_kind == "crypto":
-                be_thresh = float(exits_cfg.get("crypto_breakeven_gain_pct", 0.03))
+                tp1_thresh = float(exits_cfg.get("crypto_tp1_gain_pct", 0.03))
+                tp2_thresh = float(exits_cfg.get("crypto_tp2_gain_pct", 0.06))
+                tp3_thresh = float(exits_cfg.get("crypto_tp3_gain_pct", 0.10))
+                tp1_ratio = float(exits_cfg.get("crypto_tp1_ratio", 0.50))
+                tp2_ratio = float(exits_cfg.get("crypto_tp2_ratio", 0.30))
                 trail_act = float(exits_cfg.get("crypto_trailing_activation_pct", 0.04))
                 trail_pb = float(exits_cfg.get("crypto_trailing_pullback_pct", 0.02))
-                hard_stop = float(exits_cfg.get("crypto_hard_stop_pct", 0.06))
-                hard_target = float(exits_cfg.get("crypto_hard_target_pct", 0.12))
+                hard_stop = float(exits_cfg.get("crypto_hard_stop_pct", 0.05))
 
-                # 1. Breakeven Activation
-                if gain >= be_thresh and not track.get("breakeven_active"):
+                # 1. Multi-Stage Partial TP1 (+3.0% -> Close 50%, Move SL to Breakeven)
+                if gain >= tp1_thresh and not track.get("tp1_hit"):
+                    partial_qty = round(init_qty * tp1_ratio, 6)
+                    if 0 < partial_qty < qty:
+                        logging.info(f"[{symbol}] TP1 HIT (+{gain:.2%}) -> Closing {tp1_ratio:.0%} ({partial_qty} / {qty})")
+                        ok = False if self.dry_run else self.broker.close_position(symbol, qty=partial_qty)
+                        send_message(
+                            f"🎯 **[TP1 HIT]** `{symbol}` (+{gain:.2%}) - Banked 50% profit ({partial_qty} units). Stop-Loss moved to Breakeven!" + (" *(dry-run)*" if self.dry_run else ""),
+                            self.config.get("discord_webhook"),
+                        )
+                        self.journal.log_trade(
+                            position.get("underlying", symbol),
+                            symbol,
+                            asset_kind,
+                            "partial_exit_tp1",
+                            "close",
+                            partial_qty,
+                            current,
+                            "",
+                            "closed-dryrun" if (self.dry_run and ok is False) else "closed_tp1",
+                        )
+                    track["tp1_hit"] = True
                     track["breakeven_active"] = True
-                    logging.info(f"[{symbol}] Breakeven stop ACTIVATED (+{gain:.2%})")
 
-                # Action Plan Diagnosis
-                if track.get("breakeven_active"):
-                    track["action_plan"] = f"🛡️ Breakeven Protected (+{gain:.2%})"
+                # 2. Multi-Stage Partial TP2 (+6.0% -> Close 30% more)
+                elif gain >= tp2_thresh and not track.get("tp2_hit"):
+                    partial_qty = round(init_qty * tp2_ratio, 6)
+                    if 0 < partial_qty < qty:
+                        logging.info(f"[{symbol}] TP2 HIT (+{gain:.2%}) -> Closing {tp2_ratio:.0%} ({partial_qty} / {qty})")
+                        ok = False if self.dry_run else self.broker.close_position(symbol, qty=partial_qty)
+                        send_message(
+                            f"🎯 **[TP2 HIT]** `{symbol}` (+{gain:.2%}) - Banked 30% profit ({partial_qty} units). Trailing Stop locked!" + (" *(dry-run)*" if self.dry_run else ""),
+                            self.config.get("discord_webhook"),
+                        )
+                        self.journal.log_trade(
+                            position.get("underlying", symbol),
+                            symbol,
+                            asset_kind,
+                            "partial_exit_tp2",
+                            "close",
+                            partial_qty,
+                            current,
+                            "",
+                            "closed-dryrun" if (self.dry_run and ok is False) else "closed_tp2",
+                        )
+                    track["tp2_hit"] = True
+
+                # Status & Action Plan for UI
+                if track.get("tp2_hit"):
+                    track["action_plan"] = f"🎯 TP2 Done (80% Banked) · Runner to TP3 (+{tp3_thresh*100:.0f}%)"
+                elif track.get("tp1_hit"):
+                    track["action_plan"] = f"🎯 TP1 Done (50% Banked) · SL at Breakeven · TP2 (+{tp2_thresh*100:.1f}%)"
                 elif peak_gain >= trail_act:
                     track["action_plan"] = f"📈 Trailing Active (Peak: +{peak_gain:.1%})"
                 else:
-                    needed = max(0.0, (be_thresh - gain)) * 100
-                    track["action_plan"] = f"⏳ Breakeven at +3.0% (needs +{needed:.2f}%)"
+                    needed = max(0.0, (tp1_thresh - gain)) * 100
+                    track["action_plan"] = f"⏳ TP1 at +{tp1_thresh*100:.1f}% (needs +{needed:.2f}%)"
 
-                # 2. Breakeven Stop Trigger (Lock capital once in profit)
+                # 3. Final Exit Triggers
+                # a) Breakeven stop triggered after TP1
                 if track.get("breakeven_active") and gain <= 0.002:
-                    reason = f"🛡️ Breakeven stop hit (secured profit, peak was +{peak_gain:.1%})"
+                    reason = f"🛡️ Breakeven stop hit (secured initial capital, peak was +{peak_gain:.1%})"
 
-                # 3. Dynamic Trailing Stop (Protect peak profits)
+                # b) Trailing stop triggered
                 elif peak_gain >= trail_act:
                     pullback = (track["peak_price"] - current) / track["peak_price"]
                     if pullback >= trail_pb:
-                        reason = f"📈 Trailing stop triggered (locked in +{gain:.1%}, pulled back {pullback:.1%} from peak)"
+                        reason = f"📈 Trailing stop triggered (locked in +{gain:.1%}, peak was +{peak_gain:.1%})"
 
-                # 4. Active AI Council Re-Evaluation Exit
+                # c) AI Council / EMA 9/21 Bearish Crossover Reversal Exit
                 elif exits_cfg.get("council_reversal_exit", True) and reversal:
-                    reason = f"🧠 AI Council reversal: {reversal} (early profit lock at {gain:+.1%})"
+                    reason = f"🧠 Reversal exit: {reversal} (locked gain at {gain:+.1%})"
 
-                # 5. Hard Target / Hard Stop Fallbacks
-                elif gain >= hard_target:
-                    reason = f"🎯 Profit target hit (+{gain:.1%})"
+                # d) TP3 Full Target Hit
+                elif gain >= tp3_thresh:
+                    reason = f"🏆 TP3 Target Hit (+{gain:.1%}) - Full trend wave banked!"
+
+                # e) Hard Stop Loss
                 elif gain <= -hard_stop:
                     reason = f"🛑 Hard stop-loss hit ({gain:.1%})"
 
-            # --- B. OPTIONS POSITION DYNAMIC EXITS ---
+            # --- B. OPTIONS POSITION MULTI-STAGE EXITS ---
             elif asset_kind == "option":
                 dte = self._dte(symbol)
                 force_close_dte = int(exits_cfg.get("force_close_dte", 1))
-                opt_be_thresh = float(exits_cfg.get("options_breakeven_gain_pct", 0.20))
+                opt_tp1_thresh = float(exits_cfg.get("options_tp1_gain_pct", 0.20))
+                opt_tp2_thresh = float(exits_cfg.get("options_tp2_gain_pct", 0.35))
+                opt_tp3_thresh = float(exits_cfg.get("options_tp3_gain_pct", 0.60))
                 opt_trail_act = float(exits_cfg.get("options_trailing_activation_pct", 0.30))
                 opt_trail_pb = float(exits_cfg.get("options_trailing_pullback_pct", 0.15))
-                opt_stop = float(exits_cfg.get("stop_loss_pct", 0.35))
-                opt_target = float(exits_cfg.get("take_profit_pct", 0.60))
+                opt_stop = float(exits_cfg.get("options_hard_stop_pct", 0.35))
 
-                # 1. DTE Force Close (Avoid pin risk/assignment)
+                # 1. DTE Force Close
                 if dte is not None and dte <= force_close_dte:
                     reason = f"⏳ DTE {dte} <= {force_close_dte} (expiration safety exit)"
 
-                # 2. Breakeven Activation & Trigger
-                elif gain >= opt_be_thresh and not track.get("breakeven_active"):
+                # 2. Options TP1 (+20% -> Breakeven SL)
+                elif gain >= opt_tp1_thresh and not track.get("tp1_hit"):
+                    track["tp1_hit"] = True
                     track["breakeven_active"] = True
-                    logging.info(f"[{symbol}] Options Breakeven stop ACTIVATED (+{gain:.1%})")
+                    logging.info(f"[{symbol}] Options TP1 (+{gain:.1%}) -> SL set to Breakeven")
 
-                # Action plan
+                # Action Plan
                 if track.get("breakeven_active"):
-                    track["action_plan"] = f"🛡️ Breakeven Protected (Peak: +{peak_gain:.1%})"
+                    track["action_plan"] = f"🛡️ Breakeven Protected · TP2 (+{opt_tp2_thresh*100:.0f}%)"
                 else:
-                    track["action_plan"] = f"⏳ Target +60% | Breakeven at +20%"
+                    track["action_plan"] = f"⏳ TP1 at +20% | TP3 at +60%"
 
+                # 3. Final Options Exits
                 if not reason and track.get("breakeven_active") and gain <= 0.02:
                     reason = f"🛡️ Options Breakeven stop hit (secured capital, peak was +{peak_gain:.1%})"
-
-                # 3. Dynamic Trailing Stop on Options
                 elif not reason and peak_gain >= opt_trail_act:
                     pullback = (track["peak_price"] - current) / track["peak_price"]
                     if pullback >= opt_trail_pb:
                         reason = f"📈 Options Trailing stop (locked in +{gain:.1%}, peak was +{peak_gain:.1%})"
-
-                # 4. Fallback Target & Stop
-                elif not reason and gain >= opt_target:
-                    reason = f"🎯 Options target hit (+{gain:.1%})"
+                elif not reason and gain >= opt_tp3_thresh:
+                    reason = f"🏆 Options TP3 Hit (+{gain:.1%}) - Full profit target reached!"
                 elif not reason and gain <= -opt_stop:
                     reason = f"🛑 Options stop-loss hit ({gain:.1%})"
 
-            # Execute Exit if Triggered
+            # Execute Final Exit if Triggered
             if reason:
                 logging.info(f"Closing position {symbol}: {reason}")
                 ok = False if self.dry_run else self.broker.close_position(symbol)

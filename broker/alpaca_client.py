@@ -598,12 +598,19 @@ class AlpacaBroker:
                     symbols.append(str(leg_sym).upper())
         return [s for s in symbols if s]
 
-    def close_position(self, symbol: str) -> bool:
+    def close_position(self, symbol: str, qty: Optional[float] = None) -> bool:
         try:
-            self.trading.close_position(symbol)
+            if qty is not None and qty > 0:
+                from alpaca.trading.requests import ClosePositionRequest
+                # Format qty without trailing decimal issues
+                qty_str = f"{qty:.8f}".rstrip("0").rstrip(".") if isinstance(qty, float) else str(qty)
+                req = ClosePositionRequest(qty=qty_str)
+                self.trading.close_position(symbol, req)
+            else:
+                self.trading.close_position(symbol)
             return True
         except Exception as exc:
-            logging.error(f"close_position({symbol}) failed: {exc}")
+            logging.error(f"close_position({symbol}, qty={qty}) failed: {exc}")
             return False
 
     def close_all_positions(self) -> int:
