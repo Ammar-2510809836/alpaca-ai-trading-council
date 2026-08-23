@@ -120,19 +120,19 @@ st.markdown(
         font-size: .78rem; font-weight: 700; color: {INK};
     }}
     .sys-row {{ display:flex; align-items:center; gap:8px; padding:5px 0; font-size:.86rem; }}
-    .dot-ok {
+    .dot-ok {{
         display: inline-block; width: 8px; height: 8px; border-radius: 50%;
         background: #089981; margin-right: 8px; vertical-align: middle;
-    }
-    .dot-warn {
+    }}
+    .dot-warn {{
         display: inline-block; width: 8px; height: 8px; border-radius: 50%;
         background: #f59e0b; margin-right: 8px; vertical-align: middle;
         box-shadow: 0 0 0 3px rgba(245,158,11,.15);
-    }
-    .dot-off {
+    }}
+    .dot-off {{
         display: inline-block; width: 8px; height: 8px; border-radius: 50%;
         background: #9aa2b1; margin-right: 8px; vertical-align: middle;
-    }
+    }}
 </style>
 """,
     unsafe_allow_html=True,
